@@ -1,10 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 
-use crate::commands::chord::{self, ParsedChord};
-use crate::data::chord_types::Scope;
+use crate::commands::chord_engine::types::ChordAction;
 use crate::data::state::EditorState;
 
-use super::traits::*;
+use super::traits::ApplyChordAction;
 
 pub struct CliFrontend;
 
@@ -20,99 +19,23 @@ impl CliFrontend {
     }
 }
 
-impl ChangeFrontend for CliFrontend {
-    fn execute_change(&mut self, state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        match chord.spec.scope {
-            Scope::Line => {
-                let path = &state
-                    .current_buffer()
-                    .map(|b| b.path.clone())
-                    .unwrap_or_default();
-                let result = chord::execute_chord(path, chord)?;
-                Ok(result.modified)
+impl ApplyChordAction for CliFrontend {
+    fn apply(&mut self, state: &mut EditorState, action: &ChordAction) -> Result<String> {
+        if let Some(ref diff) = action.diff {
+            if let Some(buf) = state.current_buffer_mut() {
+                let new_lines: Vec<String> = diff.modified.lines().map(String::from).collect();
+                buf.lines = if new_lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    new_lines
+                };
+                buf.dirty = true;
             }
-            scope if scope.requires_lsp() => {
-                bail!(
-                    "chord {} requires LSP — not yet implemented in CLI mode",
-                    chord.spec.long_form()
-                );
-            }
-            _ => bail!("chord {} not implemented", chord.spec.long_form()),
+            Ok(diff.modified.clone())
+        } else if let Some(ref yanked) = action.yanked_content {
+            Ok(yanked.clone())
+        } else {
+            Ok(String::new())
         }
     }
 }
-
-impl DeleteFrontend for CliFrontend {
-    fn execute_delete(&mut self, state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        match chord.spec.scope {
-            Scope::Line => {
-                let path = &state
-                    .current_buffer()
-                    .map(|b| b.path.clone())
-                    .unwrap_or_default();
-                let result = chord::execute_chord(path, chord)?;
-                Ok(result.modified)
-            }
-            scope if scope.requires_lsp() => {
-                bail!(
-                    "chord {} requires LSP — not yet implemented in CLI mode",
-                    chord.spec.long_form()
-                );
-            }
-            _ => bail!("chord {} not implemented", chord.spec.long_form()),
-        }
-    }
-}
-
-impl InsertFrontend for CliFrontend {
-    fn execute_insert(&mut self, state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        match chord.spec.scope {
-            Scope::Line => {
-                let path = &state
-                    .current_buffer()
-                    .map(|b| b.path.clone())
-                    .unwrap_or_default();
-                let result = chord::execute_chord(path, chord)?;
-                Ok(result.modified)
-            }
-            _ => bail!("chord {} not implemented", chord.spec.long_form()),
-        }
-    }
-}
-
-impl ReadFrontend for CliFrontend {
-    fn execute_read(&mut self, state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        let path = &state
-            .current_buffer()
-            .map(|b| b.path.clone())
-            .unwrap_or_default();
-        let result = chord::execute_chord(path, chord)?;
-        Ok(result.modified)
-    }
-}
-
-impl MoveFrontend for CliFrontend {
-    fn execute_move(&mut self, _state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        bail!(
-            "chord {} not yet implemented in CLI mode",
-            chord.spec.long_form()
-        )
-    }
-}
-
-impl SelectFrontend for CliFrontend {
-    fn execute_select(&mut self, _state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        bail!(
-            "chord {} not yet implemented in CLI mode",
-            chord.spec.long_form()
-        )
-    }
-}
-
-impl YankFrontend for CliFrontend {
-    fn execute_yank(&mut self, state: &mut EditorState, chord: &ParsedChord) -> Result<String> {
-        self.execute_read(state, chord)
-    }
-}
-
-impl ChordFrontend for CliFrontend {}

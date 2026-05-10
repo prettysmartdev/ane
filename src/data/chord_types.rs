@@ -3,96 +3,69 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     Change,
+    Replace,
     Delete,
-    Read,
-    Insert,
-    Move,
-    Select,
     Yank,
+    Append,
+    Prepend,
+    Insert,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Positional {
-    In,
-    At,
-    Around,
-    Before,
+    Inside,
+    Until,
     After,
+    Before,
+    Next,
+    Previous,
+    Entire,
+    Outside,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Scope {
+    Line,
+    Buffer,
     Function,
     Variable,
-    Block,
-    Line,
-    File,
     Struct,
-    Impl,
-    Enum,
+    Member,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Component {
-    Body,
-    Name,
-    Signature,
-    Parameters,
-    Type,
+    Beginning,
+    End,
     Value,
-    All,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChordSpec {
-    pub action: Action,
-    pub positional: Positional,
-    pub scope: Scope,
-    pub component: Component,
-    pub requires_lsp: bool,
-}
-
-impl ChordSpec {
-    pub fn short_form(&self) -> String {
-        format!(
-            "{}{}{}{}",
-            self.action.short(),
-            self.positional.short(),
-            self.scope.short(),
-            self.component.short(),
-        )
-    }
-
-    pub fn long_form(&self) -> String {
-        format!(
-            "{}{}{}{}",
-            self.action, self.positional, self.scope, self.component,
-        )
-    }
+    Parameters,
+    Arguments,
+    Name,
+    Self_,
 }
 
 impl Action {
     pub fn short(&self) -> &'static str {
         match self {
             Self::Change => "c",
+            Self::Replace => "r",
             Self::Delete => "d",
-            Self::Read => "r",
-            Self::Insert => "i",
-            Self::Move => "m",
-            Self::Select => "s",
             Self::Yank => "y",
+            Self::Append => "a",
+            Self::Prepend => "p",
+            Self::Insert => "i",
         }
     }
 
     pub fn from_short(s: &str) -> Option<Self> {
         match s {
             "c" => Some(Self::Change),
+            "r" => Some(Self::Replace),
             "d" => Some(Self::Delete),
-            "r" => Some(Self::Read),
-            "i" => Some(Self::Insert),
-            "m" => Some(Self::Move),
-            "s" => Some(Self::Select),
             "y" => Some(Self::Yank),
+            "a" => Some(Self::Append),
+            "p" => Some(Self::Prepend),
+            "i" => Some(Self::Insert),
             _ => None,
         }
     }
@@ -101,21 +74,27 @@ impl Action {
 impl Positional {
     pub fn short(&self) -> &'static str {
         match self {
-            Self::In => "i",
-            Self::At => "a",
-            Self::Around => "r",
+            Self::Inside => "i",
+            Self::Until => "u",
+            Self::After => "a",
             Self::Before => "b",
-            Self::After => "f",
+            Self::Next => "n",
+            Self::Previous => "p",
+            Self::Entire => "e",
+            Self::Outside => "o",
         }
     }
 
     pub fn from_short(s: &str) -> Option<Self> {
         match s {
-            "i" => Some(Self::In),
-            "a" => Some(Self::At),
-            "r" => Some(Self::Around),
+            "i" => Some(Self::Inside),
+            "u" => Some(Self::Until),
+            "a" => Some(Self::After),
             "b" => Some(Self::Before),
-            "f" => Some(Self::After),
+            "n" => Some(Self::Next),
+            "p" => Some(Self::Previous),
+            "e" => Some(Self::Entire),
+            "o" => Some(Self::Outside),
             _ => None,
         }
     }
@@ -124,60 +103,72 @@ impl Positional {
 impl Scope {
     pub fn short(&self) -> &'static str {
         match self {
+            Self::Line => "l",
+            Self::Buffer => "b",
             Self::Function => "f",
             Self::Variable => "v",
-            Self::Block => "b",
-            Self::Line => "l",
-            Self::File => "F",
             Self::Struct => "s",
-            Self::Impl => "m",
-            Self::Enum => "e",
+            Self::Member => "m",
         }
     }
 
     pub fn from_short(s: &str) -> Option<Self> {
         match s {
+            "l" => Some(Self::Line),
+            "b" => Some(Self::Buffer),
             "f" => Some(Self::Function),
             "v" => Some(Self::Variable),
-            "b" => Some(Self::Block),
-            "l" => Some(Self::Line),
-            "F" => Some(Self::File),
             "s" => Some(Self::Struct),
-            "m" => Some(Self::Impl),
-            "e" => Some(Self::Enum),
+            "m" => Some(Self::Member),
             _ => None,
         }
     }
 
     pub fn requires_lsp(&self) -> bool {
-        !matches!(self, Self::Line | Self::File)
+        !matches!(self, Self::Line | Self::Buffer)
     }
 }
 
 impl Component {
     pub fn short(&self) -> &'static str {
         match self {
-            Self::Body => "b",
-            Self::Name => "n",
-            Self::Signature => "s",
-            Self::Parameters => "p",
-            Self::Type => "t",
+            Self::Beginning => "b",
+            Self::End => "e",
             Self::Value => "v",
-            Self::All => "a",
+            Self::Parameters => "p",
+            Self::Arguments => "a",
+            Self::Name => "n",
+            Self::Self_ => "s",
         }
     }
 
     pub fn from_short(s: &str) -> Option<Self> {
         match s {
-            "b" => Some(Self::Body),
-            "n" => Some(Self::Name),
-            "s" => Some(Self::Signature),
-            "p" => Some(Self::Parameters),
-            "t" => Some(Self::Type),
+            "b" => Some(Self::Beginning),
+            "e" => Some(Self::End),
             "v" => Some(Self::Value),
-            "a" => Some(Self::All),
+            "p" => Some(Self::Parameters),
+            "a" => Some(Self::Arguments),
+            "n" => Some(Self::Name),
+            "s" => Some(Self::Self_),
             _ => None,
         }
+    }
+}
+
+pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
+    match (scope, component) {
+        (_, Component::Beginning | Component::End | Component::Name | Component::Self_) => true,
+        (Scope::Line, Component::Value | Component::Parameters | Component::Arguments) => false,
+        (Scope::Buffer, Component::Value | Component::Parameters | Component::Arguments) => false,
+        (Scope::Function, Component::Value | Component::Parameters) => true,
+        (Scope::Function, Component::Arguments) => true,
+        (Scope::Variable, Component::Value) => true,
+        (Scope::Variable, Component::Parameters | Component::Arguments) => false,
+        (Scope::Struct, Component::Value) => true,
+        (Scope::Struct, Component::Parameters | Component::Arguments) => false,
+        (Scope::Member, Component::Value) => true,
+        (Scope::Member, Component::Parameters | Component::Arguments) => false,
     }
 }
 
@@ -185,12 +176,12 @@ impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Change => write!(f, "Change"),
+            Self::Replace => write!(f, "Replace"),
             Self::Delete => write!(f, "Delete"),
-            Self::Read => write!(f, "Read"),
-            Self::Insert => write!(f, "Insert"),
-            Self::Move => write!(f, "Move"),
-            Self::Select => write!(f, "Select"),
             Self::Yank => write!(f, "Yank"),
+            Self::Append => write!(f, "Append"),
+            Self::Prepend => write!(f, "Prepend"),
+            Self::Insert => write!(f, "Insert"),
         }
     }
 }
@@ -198,11 +189,14 @@ impl fmt::Display for Action {
 impl fmt::Display for Positional {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::In => write!(f, "In"),
-            Self::At => write!(f, "At"),
-            Self::Around => write!(f, "Around"),
-            Self::Before => write!(f, "Before"),
+            Self::Inside => write!(f, "Inside"),
+            Self::Until => write!(f, "Until"),
             Self::After => write!(f, "After"),
+            Self::Before => write!(f, "Before"),
+            Self::Next => write!(f, "Next"),
+            Self::Previous => write!(f, "Previous"),
+            Self::Entire => write!(f, "Entire"),
+            Self::Outside => write!(f, "Outside"),
         }
     }
 }
@@ -210,14 +204,12 @@ impl fmt::Display for Positional {
 impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Line => write!(f, "Line"),
+            Self::Buffer => write!(f, "Buffer"),
             Self::Function => write!(f, "Function"),
             Self::Variable => write!(f, "Variable"),
-            Self::Block => write!(f, "Block"),
-            Self::Line => write!(f, "Line"),
-            Self::File => write!(f, "File"),
             Self::Struct => write!(f, "Struct"),
-            Self::Impl => write!(f, "Impl"),
-            Self::Enum => write!(f, "Enum"),
+            Self::Member => write!(f, "Member"),
         }
     }
 }
@@ -225,13 +217,13 @@ impl fmt::Display for Scope {
 impl fmt::Display for Component {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Body => write!(f, "Body"),
-            Self::Name => write!(f, "Name"),
-            Self::Signature => write!(f, "Signature"),
-            Self::Parameters => write!(f, "Parameters"),
-            Self::Type => write!(f, "Type"),
+            Self::Beginning => write!(f, "Beginning"),
+            Self::End => write!(f, "End"),
             Self::Value => write!(f, "Value"),
-            Self::All => write!(f, "All"),
+            Self::Parameters => write!(f, "Parameters"),
+            Self::Arguments => write!(f, "Arguments"),
+            Self::Name => write!(f, "Name"),
+            Self::Self_ => write!(f, "Self"),
         }
     }
 }
@@ -241,28 +233,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_form_round_trip() {
-        let spec = ChordSpec {
-            action: Action::Change,
-            positional: Positional::In,
-            scope: Scope::Function,
-            component: Component::Body,
-            requires_lsp: true,
-        };
-        assert_eq!(spec.short_form(), "cifb");
-        assert_eq!(spec.long_form(), "ChangeInFunctionBody");
-    }
-
-    #[test]
     fn action_short_round_trip() {
         for action in [
             Action::Change,
+            Action::Replace,
             Action::Delete,
-            Action::Read,
-            Action::Insert,
-            Action::Move,
-            Action::Select,
             Action::Yank,
+            Action::Append,
+            Action::Prepend,
+            Action::Insert,
         ] {
             let short = action.short();
             assert_eq!(Action::from_short(short), Some(action));
@@ -270,23 +249,132 @@ mod tests {
     }
 
     #[test]
-    fn scope_lsp_requirement() {
-        assert!(Scope::Function.requires_lsp());
-        assert!(Scope::Variable.requires_lsp());
-        assert!(!Scope::Line.requires_lsp());
-        assert!(!Scope::File.requires_lsp());
+    fn positional_short_round_trip() {
+        for positional in [
+            Positional::Inside,
+            Positional::Until,
+            Positional::After,
+            Positional::Before,
+            Positional::Next,
+            Positional::Previous,
+            Positional::Entire,
+            Positional::Outside,
+        ] {
+            let short = positional.short();
+            assert_eq!(Positional::from_short(short), Some(positional));
+        }
     }
 
     #[test]
-    fn delete_at_variable_value_short_form() {
-        let spec = ChordSpec {
-            action: Action::Delete,
-            positional: Positional::At,
-            scope: Scope::Variable,
-            component: Component::Value,
-            requires_lsp: true,
-        };
-        assert_eq!(spec.short_form(), "davv");
-        assert_eq!(spec.long_form(), "DeleteAtVariableValue");
+    fn scope_short_round_trip() {
+        for scope in [
+            Scope::Line,
+            Scope::Buffer,
+            Scope::Function,
+            Scope::Variable,
+            Scope::Struct,
+            Scope::Member,
+        ] {
+            let short = scope.short();
+            assert_eq!(Scope::from_short(short), Some(scope));
+        }
+    }
+
+    #[test]
+    fn component_short_round_trip() {
+        for component in [
+            Component::Beginning,
+            Component::End,
+            Component::Value,
+            Component::Parameters,
+            Component::Arguments,
+            Component::Name,
+            Component::Self_,
+        ] {
+            let short = component.short();
+            assert_eq!(Component::from_short(short), Some(component));
+        }
+    }
+
+    #[test]
+    fn scope_lsp_requirement() {
+        assert!(!Scope::Line.requires_lsp());
+        assert!(!Scope::Buffer.requires_lsp());
+        assert!(Scope::Function.requires_lsp());
+        assert!(Scope::Variable.requires_lsp());
+        assert!(Scope::Struct.requires_lsp());
+        assert!(Scope::Member.requires_lsp());
+    }
+
+    #[test]
+    fn valid_combinations() {
+        assert!(is_valid_combination(Scope::Function, Component::Parameters));
+        assert!(is_valid_combination(Scope::Function, Component::Value));
+        assert!(is_valid_combination(Scope::Variable, Component::Value));
+        assert!(is_valid_combination(Scope::Struct, Component::Value));
+        assert!(is_valid_combination(Scope::Member, Component::Value));
+        assert!(is_valid_combination(Scope::Line, Component::Beginning));
+        assert!(is_valid_combination(Scope::Line, Component::End));
+        assert!(is_valid_combination(Scope::Line, Component::Self_));
+    }
+
+    #[test]
+    fn invalid_combinations() {
+        assert!(!is_valid_combination(Scope::Line, Component::Parameters));
+        assert!(!is_valid_combination(Scope::Line, Component::Value));
+        assert!(!is_valid_combination(Scope::Buffer, Component::Parameters));
+        assert!(!is_valid_combination(
+            Scope::Variable,
+            Component::Parameters
+        ));
+        assert!(!is_valid_combination(Scope::Struct, Component::Parameters));
+    }
+
+    #[test]
+    fn each_position_has_unique_short_letters() {
+        let actions = ["c", "r", "d", "y", "a", "p", "i"];
+        let positionals = ["i", "u", "a", "b", "n", "p", "e", "o"];
+        let scopes = ["l", "b", "f", "v", "s", "m"];
+        let components = ["b", "e", "v", "p", "a", "n", "s"];
+        for set in [&actions[..], &positionals[..], &scopes[..], &components[..]] {
+            let mut seen = std::collections::HashSet::new();
+            for s in set {
+                assert!(seen.insert(*s), "duplicate short letter '{s}' in {:?}", set);
+            }
+        }
+    }
+
+    #[test]
+    fn all_combinations_are_either_valid_or_invalid_no_panics() {
+        let scopes = [
+            Scope::Line,
+            Scope::Buffer,
+            Scope::Function,
+            Scope::Variable,
+            Scope::Struct,
+            Scope::Member,
+        ];
+        let components = [
+            Component::Beginning,
+            Component::End,
+            Component::Value,
+            Component::Parameters,
+            Component::Arguments,
+            Component::Name,
+            Component::Self_,
+        ];
+        for s in &scopes {
+            for c in &components {
+                let _ = is_valid_combination(*s, *c);
+            }
+        }
+    }
+
+    #[test]
+    fn display_formats() {
+        assert_eq!(format!("{}", Action::Change), "Change");
+        assert_eq!(format!("{}", Positional::Inside), "Inside");
+        assert_eq!(format!("{}", Scope::Function), "Function");
+        assert_eq!(format!("{}", Component::Self_), "Self");
     }
 }

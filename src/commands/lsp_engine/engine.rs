@@ -130,6 +130,8 @@ pub struct LspEngine {
     config: LspEngineConfig,
     event_tx: mpsc::Sender<LspEvent>,
     event_rx: mpsc::Receiver<LspEvent>,
+    #[cfg(test)]
+    test_symbols: HashMap<PathBuf, Vec<DocumentSymbol>>,
 }
 
 impl LspEngine {
@@ -140,7 +142,14 @@ impl LspEngine {
             config,
             event_tx,
             event_rx,
+            #[cfg(test)]
+            test_symbols: HashMap::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn inject_test_symbols(&mut self, path: PathBuf, symbols: Vec<DocumentSymbol>) {
+        self.test_symbols.insert(path, symbols);
     }
 
     pub fn start_for_context(&mut self, root_path: &Path, files: &[&Path]) -> Result<()> {
@@ -344,6 +353,10 @@ impl LspEngine {
     // --- LSP Query Methods ---
 
     pub fn document_symbols(&mut self, file_path: &Path) -> Result<Vec<DocumentSymbol>> {
+        #[cfg(test)]
+        if let Some(syms) = self.test_symbols.get(file_path) {
+            return Ok(syms.clone());
+        }
         let lang = self.language_for_file(file_path)?;
         self.ensure_open(lang, file_path)?;
         let uri = path_to_uri(file_path);

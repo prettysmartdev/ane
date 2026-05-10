@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -13,7 +14,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::commands::chord;
+use crate::commands::chord_engine::ChordEngine;
 use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use crate::data::lsp::registry;
 use crate::data::lsp::types::Language;
@@ -26,7 +27,7 @@ use super::status_bar;
 use super::tree_pane;
 use super::tui_frontend::TuiFrontend;
 
-use crate::frontend::traits::ChordFrontend;
+use crate::frontend::traits::ApplyChordAction;
 
 pub fn run(path: &Path) -> Result<()> {
     let mut state = if path.is_dir() {
@@ -123,7 +124,9 @@ fn event_loop(
                 handle_exit_modal(state, key.code, key.modifiers);
             } else {
                 match state.mode {
-                    Mode::Chord => handle_chord_mode(state, frontend, key.code, key.modifiers),
+                    Mode::Chord => {
+                        handle_chord_mode(state, frontend, engine, key.code, key.modifiers)
+                    }
                     Mode::Edit => handle_edit_mode(state, key.code, key.modifiers),
                 }
             }
@@ -146,6 +149,7 @@ fn handle_exit_modal(state: &mut EditorState, code: KeyCode, modifiers: KeyModif
 fn handle_chord_mode(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
+    lsp: &mut LspEngine,
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {
@@ -199,7 +203,7 @@ fn handle_chord_mode(
             } else if !state.chord_input.is_empty() {
                 let input = state.chord_input.clone();
                 state.chord_input.clear();
-                execute_chord_input(state, frontend, &input);
+                execute_chord_input(state, frontend, lsp, &input);
             }
         }
         KeyCode::Backspace => {
@@ -334,33 +338,61 @@ fn toggle_tree(state: &mut EditorState) {
     }
 }
 
-fn execute_chord_input(state: &mut EditorState, frontend: &mut TuiFrontend, input: &str) {
-    match chord::parse_chord(input) {
-        Ok(parsed) => {
-            if parsed.spec.requires_lsp && !state.lsp_status.is_available() {
+fn execute_chord_input(
+    state: &mut EditorState,
+    frontend: &mut TuiFrontend,
+    lsp: &mut LspEngine,
+    input: &str,
+) {
+    match ChordEngine::parse(input) {
+        Ok(mut query) => {
+            if query.requires_lsp && !state.lsp_status.is_available() {
                 if state.lsp_status.is_pending() {
                     state.status_msg = format!(
                         "chord {} waiting for LSP ({})",
-                        parsed.spec.short_form(),
+                        query.short_form(),
                         state.lsp_status.display()
                     );
                 } else {
                     state.status_msg = format!(
                         "chord {} requires LSP but {}",
-                        parsed.spec.short_form(),
+                        query.short_form(),
                         state.lsp_status.display()
                     );
                 }
                 return;
             }
-            match frontend.dispatch(state, &parsed) {
-                Ok(msg) => {
-                    if !msg.is_empty() && state.status_msg.is_empty() {
-                        state.status_msg = msg;
+
+            query.args.cursor_pos = Some((state.cursor_line, state.cursor_col));
+
+            let mut buffers = HashMap::new();
+            if let Some(buf) = state.current_buffer() {
+                let path_str = buf.path.to_string_lossy().to_string();
+                buffers.insert(path_str, buf.clone());
+            }
+
+            match ChordEngine::resolve(&query, &buffers, lsp) {
+                Ok(resolved) => match ChordEngine::patch(&resolved, &buffers) {
+                    Ok(actions) => {
+                        for action in actions.values() {
+                            match frontend.apply(state, action) {
+                                Ok(msg) => {
+                                    if !msg.is_empty() && state.status_msg.is_empty() {
+                                        state.status_msg = msg;
+                                    }
+                                }
+                                Err(e) => {
+                                    state.status_msg = format!("error: {e}");
+                                }
+                            }
+                        }
                     }
-                }
+                    Err(e) => {
+                        state.status_msg = format!("patch error: {e}");
+                    }
+                },
                 Err(e) => {
-                    state.status_msg = format!("error: {e}");
+                    state.status_msg = format!("resolve error: {e}");
                 }
             }
         }
