@@ -12,6 +12,7 @@ fn make_buffer(path: &str, content: &str) -> Buffer {
         path: PathBuf::from(path),
         lines: content.lines().map(String::from).collect(),
         dirty: false,
+        trailing_newline: content.ends_with('\n'),
     }
 }
 

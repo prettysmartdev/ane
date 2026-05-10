@@ -231,6 +231,7 @@ mod tests {
             path: PathBuf::from("/test/file.rs"),
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
+            trailing_newline: false,
         }
     }
 

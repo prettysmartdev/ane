@@ -33,7 +33,7 @@ pub struct LspEngineConfig {
 impl Default for LspEngineConfig {
     fn default() -> Self {
         Self {
-            auto_install: false,
+            auto_install: true,
             startup_timeout: Duration::from_secs(30),
             binary_name_override: None,
             binary_args_override: Vec::new(),
@@ -1099,6 +1099,11 @@ fn parse_location(value: &Value) -> Option<Location> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn auto_install_true_by_default() {
+        assert!(LspEngineConfig::default().auto_install);
+    }
 
     #[test]
     fn server_state_undetected_when_no_server_registered() {

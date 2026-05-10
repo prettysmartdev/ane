@@ -8,8 +8,9 @@ pub fn unified_diff(path: &str, original: &str, modified: &str) -> String {
     let diff = TextDiff::from_lines(original, modified);
     let mut output = String::new();
 
-    output.push_str(&format!("--- a/{path}\n"));
-    output.push_str(&format!("+++ b/{path}\n"));
+    let clean = path.strip_prefix('/').unwrap_or(path);
+    output.push_str(&format!("--- a/{clean}\n"));
+    output.push_str(&format!("+++ b/{clean}\n"));
 
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
         output.push_str(&format!("{hunk}"));
@@ -46,6 +47,13 @@ mod tests {
         assert!(result.contains("+++ b/test.rs"));
         assert!(result.contains("-bbb"));
         assert!(result.contains("+xxx"));
+    }
+
+    #[test]
+    fn absolute_path_does_not_double_slash() {
+        let result = unified_diff("/tmp/foo.rs", "old\n", "new\n");
+        assert!(result.contains("--- a/tmp/foo.rs"), "got:\n{result}");
+        assert!(!result.contains("a//tmp/foo.rs"), "got:\n{result}");
     }
 
     #[test]

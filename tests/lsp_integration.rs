@@ -41,7 +41,9 @@ fn initialize_handshake_reaches_running() {
 
 #[test]
 fn startup_transitions_to_missing_when_not_installed() {
-    let config = LspEngineConfig::default().with_server_override(MOCK_SERVER, vec![], "false");
+    let config = LspEngineConfig::default()
+        .with_auto_install(false)
+        .with_server_override(MOCK_SERVER, vec![], "false");
     let mut engine = LspEngine::new(config);
     let state = start_and_wait(&mut engine);
     assert_eq!(state, ServerState::Missing);

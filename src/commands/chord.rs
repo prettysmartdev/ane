@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::data::buffer::Buffer;
+use crate::data::lsp::registry;
+use crate::data::lsp::types::ServerState;
 
-use super::chord_engine::types::ChordQuery;
+use super::chord_engine::types::{ChordArgs, ChordQuery};
 use super::chord_engine::ChordEngine;
 use super::lsp_engine::{LspEngine, LspEngineConfig};
 
@@ -13,6 +16,17 @@ pub fn parse_chord(input: &str) -> Result<ChordQuery> {
     ChordEngine::parse(input)
 }
 
+fn args_are_empty(args: &ChordArgs) -> bool {
+    args.target_name.is_none()
+        && args.parent_name.is_none()
+        && args.target_line.is_none()
+        && args.cursor_pos.is_none()
+        && args.value.is_none()
+        && args.find.is_none()
+        && args.replace.is_none()
+}
+
+#[derive(Debug)]
 pub struct ChordResult {
     pub original: String,
     pub modified: String,
@@ -21,20 +35,68 @@ pub struct ChordResult {
 }
 
 pub fn execute_chord(path: &Path, chord: &ChordQuery) -> Result<ChordResult> {
-    let buffer = if path.exists() {
-        Buffer::from_file(path)?
-    } else {
-        bail!("file not found: {}", path.display());
-    };
+    execute_chord_with_config(path, chord, LspEngineConfig::default())
+}
 
+pub fn execute_chord_with_config(
+    path: &Path,
+    chord: &ChordQuery,
+    lsp_config: LspEngineConfig,
+) -> Result<ChordResult> {
+    if !path.exists() {
+        bail!("file not found: {}", path.display());
+    }
+
+    let abs_path = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize path: {}", path.display()))?;
+
+    let buffer = Buffer::from_file(&abs_path)?;
     let original = buffer.content();
-    let path_str = path.to_string_lossy().to_string();
+    let path_str = abs_path.to_string_lossy().to_string();
     let mut buffers = HashMap::new();
     buffers.insert(path_str.clone(), buffer);
 
-    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    let mut chord = chord.clone();
+    resolve_stdin_sentinels(&mut chord)?;
 
-    let resolved = ChordEngine::resolve(chord, &buffers, &mut lsp)?;
+    if args_are_empty(&chord.args) {
+        bail!(
+            "exec mode requires explicit parameters, e.g. {}(fn_name, \"body\")",
+            chord.short_form()
+        );
+    }
+
+    let lsp_timeout = lsp_config.startup_timeout;
+    let mut lsp = LspEngine::new(lsp_config);
+
+    if chord.requires_lsp {
+        let lang = registry::detect_language_from_path(&abs_path).ok_or_else(|| {
+            anyhow::anyhow!("no language server available for {}", path.display())
+        })?;
+
+        let root_path = abs_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("cannot determine parent directory"))?;
+
+        lsp.start_for_context(root_path, &[&abs_path])?;
+
+        let state = lsp.await_ready(lang, lsp_timeout)?;
+
+        match state {
+            ServerState::Running => {}
+            ServerState::Failed => {
+                bail!("LSP server for {} failed to start", lang.name());
+            }
+            _ => {
+                bail!(
+                    "LSP server for {} did not become ready within 30s",
+                    lang.name()
+                );
+            }
+        }
+    }
+
+    let resolved = ChordEngine::resolve(&chord, &buffers, &mut lsp)?;
     let actions = ChordEngine::patch(&resolved, &buffers)?;
 
     if let Some(action) = actions.get(&path_str) {
@@ -45,7 +107,7 @@ pub fn execute_chord(path: &Path, chord: &ChordQuery) -> Result<ChordResult> {
         };
 
         if modified != original {
-            std::fs::write(path, &modified)?;
+            std::fs::write(&abs_path, &modified)?;
         }
 
         Ok(ChordResult {
@@ -64,6 +126,57 @@ pub fn execute_chord(path: &Path, chord: &ChordQuery) -> Result<ChordResult> {
     }
 }
 
+fn strip_trailing_newline(s: &mut String) {
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+}
+
+fn resolve_stdin_sentinels(chord: &mut ChordQuery) -> Result<()> {
+    let has_sentinel = [
+        chord.args.value.as_deref(),
+        chord.args.target_name.as_deref(),
+        chord.args.find.as_deref(),
+        chord.args.replace.as_deref(),
+    ]
+    .contains(&Some("-"));
+
+    if !has_sentinel {
+        return Ok(());
+    }
+
+    if std::io::stdin().is_terminal() {
+        bail!("chord parameter '-' requires piped input on stdin");
+    }
+
+    let mut stdin_content = String::new();
+    std::io::stdin()
+        .read_to_string(&mut stdin_content)
+        .map_err(|e| anyhow::anyhow!("failed to read stdin: {e}"))?;
+
+    // Strip exactly one trailing newline so `echo "foo" | ane exec ...` matches a literal "foo"
+    strip_trailing_newline(&mut stdin_content);
+
+    // All `-` sentinels share the same stdin read
+    if chord.args.value.as_deref() == Some("-") {
+        chord.args.value = Some(stdin_content.clone());
+    }
+    if chord.args.target_name.as_deref() == Some("-") {
+        chord.args.target_name = Some(stdin_content.clone());
+    }
+    if chord.args.find.as_deref() == Some("-") {
+        chord.args.find = Some(stdin_content.clone());
+    }
+    if chord.args.replace.as_deref() == Some("-") {
+        chord.args.replace = Some(stdin_content);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +188,115 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
+    }
+
+    // --- strip_trailing_newline ---
+
+    #[test]
+    fn trailing_newline_strip_removes_lf() {
+        let mut s = "foo\n".to_string();
+        strip_trailing_newline(&mut s);
+        assert_eq!(s, "foo");
+    }
+
+    #[test]
+    fn trailing_newline_strip_no_change_without_newline() {
+        let mut s = "foo".to_string();
+        strip_trailing_newline(&mut s);
+        assert_eq!(s, "foo");
+    }
+
+    #[test]
+    fn trailing_newline_strip_removes_crlf() {
+        let mut s = "foo\r\n".to_string();
+        strip_trailing_newline(&mut s);
+        assert_eq!(s, "foo");
+    }
+
+    // --- stdin-is-TTY rejection ---
+
+    #[test]
+    fn stdin_sentinel_tty_rejection_exact_message() {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            // Can only assert TTY rejection when stdin is an interactive terminal.
+            // When piped (e.g. in CI), this path is exercised by binary tests instead.
+            return;
+        }
+        let mut chord = parse_chord("cels").unwrap();
+        chord.args.target_line = Some(0);
+        chord.args.value = Some("-".to_string());
+
+        let result = resolve_stdin_sentinels(&mut chord);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "chord parameter '-' requires piped input on stdin"
+        );
+    }
+
+    // --- error message formats ---
+
+    #[test]
+    fn error_message_file_not_found_exact_format() {
+        let chord = parse_chord("cels").unwrap();
+        let result = execute_chord(Path::new("/nonexistent/path/does-not-exist.rs"), &chord);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("file not found: /nonexistent/path/does-not-exist.rs"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_message_exec_requires_explicit_params() {
+        // LSP-scoped chord with no target_name or cursor_pos triggers this error before
+        // any LSP server is started.
+        let mut f_rs = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
+        f_rs.write_all(b"fn main() {}").unwrap();
+        f_rs.flush().unwrap();
+
+        let chord = parse_chord("cifv").unwrap(); // ChangeInsideFunctionValue, requires_lsp=true
+                                                  // No target_name or cursor_pos set → error before LSP starts
+        let result = execute_chord(f_rs.path(), &chord);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exec mode requires explicit parameters"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_message_bare_chord_rejected_for_line_scope() {
+        // Non-LSP scope without args must also be rejected.
+        let f = temp_file("hello\n");
+        let chord = parse_chord("cels").unwrap();
+        let result = execute_chord(f.path(), &chord);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exec mode requires explicit parameters"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_message_no_language_server_for_non_rust_file() {
+        // Non-.rs file with an LSP-scoped chord that has a target_name set.
+        // Fails with "no language server available" after the param check.
+        let mut f = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        f.write_all(b"some content").unwrap();
+        f.flush().unwrap();
+
+        let mut chord = parse_chord("cifv").unwrap();
+        chord.args.target_name = Some("some_fn".to_string());
+
+        let result = execute_chord(f.path(), &chord);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no language server available"), "got: {msg}");
     }
 
     #[test]

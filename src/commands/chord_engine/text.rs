@@ -56,18 +56,19 @@ pub fn extract_range_text(buffer: &Buffer, range: &TextRange) -> String {
     result
 }
 
-/// Apply a single text replacement at `range`, splitting on '\n' (preserving
-/// trailing empty lines, unlike str::lines).
-pub fn apply_single_replacement(buffer: &Buffer, range: &TextRange, replacement: &str) -> String {
-    let mut lines = buffer.lines.clone();
+/// Splice `replacement` into `lines` at `range` (character-indexed). Returns
+/// the resulting Vec<String>, splitting on '\n' (preserves trailing empty
+/// lines, unlike str::lines).
+fn splice_lines(lines: &[String], range: &TextRange, replacement: &str) -> Vec<String> {
     if lines.is_empty() {
         let mut out: Vec<String> = replacement.split('\n').map(String::from).collect();
         if out.is_empty() {
             out.push(String::new());
         }
-        return out.join("\n");
+        return out;
     }
 
+    let mut lines = lines.to_vec();
     let last = lines.len().saturating_sub(1);
     let start_line = range.start_line.min(last);
     let end_line = range.end_line.min(last);
@@ -84,7 +85,23 @@ pub fn apply_single_replacement(buffer: &Buffer, range: &TextRange, replacement:
     }
 
     lines.splice(start_line..=end_line, new_lines);
-    lines.join("\n")
+    lines
+}
+
+fn lines_to_content(lines: &[String], buffer: &Buffer) -> String {
+    let mut s = lines.join("\n");
+    if buffer.trailing_newline {
+        s.push('\n');
+    }
+    s
+}
+
+/// Apply a single text replacement at `range`, splitting on '\n' (preserving
+/// trailing empty lines, unlike str::lines). The result reproduces the
+/// buffer's trailing-newline behavior.
+pub fn apply_single_replacement(buffer: &Buffer, range: &TextRange, replacement: &str) -> String {
+    let new_lines = splice_lines(&buffer.lines, range, replacement);
+    lines_to_content(&new_lines, buffer)
 }
 
 /// Apply many replacements (range, replacement) to the buffer. Ranges must be
@@ -100,15 +117,11 @@ pub fn apply_replacements(buffer: &Buffer, edits: &[(TextRange, String)]) -> Str
             .cmp(&a.0.start_line)
             .then(b.0.start_col.cmp(&a.0.start_col))
     });
-    let mut current = buffer.clone();
+    let mut lines = buffer.lines.clone();
     for (range, replacement) in &sorted {
-        let modified = apply_single_replacement(&current, range, replacement);
-        current.lines = modified.split('\n').map(String::from).collect();
-        if current.lines.is_empty() {
-            current.lines.push(String::new());
-        }
+        lines = splice_lines(&lines, range, replacement);
     }
-    current.lines.join("\n")
+    lines_to_content(&lines, buffer)
 }
 
 pub fn apply_insertion(buffer: &Buffer, line: usize, col: usize, insertion: &str) -> String {

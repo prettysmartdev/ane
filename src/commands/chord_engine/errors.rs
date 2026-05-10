@@ -165,3 +165,30 @@ fn valid_components_for_scope(scope: Scope) -> Vec<Component> {
         .filter(|c| crate::data::chord_types::is_valid_combination(scope, *c))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_with_symbols_renders_candidate_list() {
+        let err = ChordError::resolve_with_symbols(
+            "/tmp/foo.rs",
+            "symbol 'fn_x' not found",
+            vec!["fn_one".to_string(), "fn_two".to_string()],
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("symbol 'fn_x' not found"), "got: {msg}");
+        assert!(
+            msg.contains("available symbols: fn_one, fn_two"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_with_no_symbols_omits_candidate_line() {
+        let err = ChordError::resolve("/tmp/foo.rs", "boom");
+        let msg = err.to_string();
+        assert_eq!(msg, "chord resolve error in /tmp/foo.rs: boom");
+    }
+}

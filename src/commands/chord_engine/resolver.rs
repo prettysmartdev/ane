@@ -120,7 +120,7 @@ fn resolve_line_scope(query: &ChordQuery, buffer: &Buffer, buffer_name: &str) ->
         return Err(ChordError::resolve(
             buffer_name,
             format!(
-                "line {line} out of range (buffer has {} lines)",
+                "line {line} out of range (file has {} lines)",
                 buffer.line_count()
             ),
         )
@@ -1051,6 +1051,7 @@ mod tests {
             path: PathBuf::from("/test/file.rs"),
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
+            trailing_newline: false,
         }
     }
 
@@ -1059,6 +1060,7 @@ mod tests {
             path: PathBuf::from(path),
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
+            trailing_newline: false,
         }
     }
 
@@ -1246,6 +1248,7 @@ mod tests {
             path: PathBuf::from("/test"),
             lines: vec![],
             dirty: false,
+            trailing_newline: false,
         };
         let range = resolve_buffer_scope(&buffer).unwrap();
         assert_eq!(range.end_line, 0);
