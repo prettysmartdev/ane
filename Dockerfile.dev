@@ -1,0 +1,42 @@
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System packages for building Rust projects and general development
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    curl \
+    make \
+    pkg-config \
+    build-essential \
+    gcc \
+    g++ \
+    musl-tools \
+    musl-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup (stable toolchain)
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile default && \
+    rustup component add clippy rustfmt rust-analyzer && \
+    rustup target add x86_64-unknown-linux-musl
+
+# Pre-fetch and cache dependencies by building a dummy project first
+# This layer is invalidated only when Cargo.toml changes
+WORKDIR /workspace
+COPY Cargo.toml ./
+RUN mkdir -p src && \
+    echo 'fn main() {}' > src/main.rs && \
+    echo '' > src/lib.rs && \
+    cargo fetch && \
+    rm -rf src
+
+COPY . .
+
+CMD ["/bin/bash"]

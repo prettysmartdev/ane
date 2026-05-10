@@ -1,0 +1,30 @@
+[package]
+name = "ane"
+version = "0.1.0"
+edition = "2021"
+description = "Agent Native Editor — a modern vim-inspired terminal editor built for humans and code agents"
+license = "MIT"
+rust-version = "1.75"
+
+[[bin]]
+name = "ane"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.29"
+similar = "2"
+walkdir = "2"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
+[profile.release.build-override]
+opt-level = 3
