@@ -1,0 +1,11 @@
+  1. cargo build --release — confirm release build is clean.
+  2. Replace single line: printf 'a\nb\nc\n' > /tmp/t && cargo run --bin ane -- exec --chord 'cels(line:1, value:"X")' /tmp/t → diff replaces b with X.
+  3. Find/replace within line: printf 'foo and foo\n' > /tmp/t && cargo run --bin ane -- exec --chord 'rels(line:0, find:"foo", replace:"bar")' /tmp/t → both foo become bar.
+  4. Yank: cargo run --bin ane -- exec --chord 'yels(line:0)' /tmp/t → prints the line to stdout, file unchanged.
+  5. Delete buffer warning: cargo run --bin ane -- exec --chord 'debs' /tmp/t → diff plus stderr warning.
+  6. Bad chord suggestion: cargo run --bin ane -- exec --chord 'xifv' /tmp/t → did you mean: cifv?.
+  7. Invalid combination: cargo run --bin ane -- exec --chord 'cilp' /tmp/t → invalid combination error listing valid components.
+  8. Unterminated paren: cargo run --bin ane -- exec --chord 'cifv(line:1' /tmp/t → unterminated argument list.
+  9. Unicode: printf 'héllo wörld\n' > /tmp/t && cargo run --bin ane -- exec --chord 'cels(line:0, value:"hi")' /tmp/t → no panic; line replaced.
+  10. TUI smoke: cargo run --bin ane -- /tmp/t and try the chord dels (should error since no cursor cell sets line: arg from CLI; in TUI path the cursor is provided automatically, so try cels
+  then type replacement and observe edit-mode hand-off).
