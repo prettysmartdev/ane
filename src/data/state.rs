@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use super::buffer::Buffer;
 use super::file_tree::FileTree;
-use super::lsp::types::LspStatus;
+use super::lsp::types::ServerState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -27,7 +27,7 @@ pub struct EditorState {
     pub focus_tree: bool,
     pub chord_input: String,
     pub show_exit_modal: bool,
-    pub lsp_status: LspStatus,
+    pub lsp_status: ServerState,
     pub opened_path: PathBuf,
 }
 
@@ -52,7 +52,7 @@ impl EditorState {
             focus_tree: false,
             chord_input: String::new(),
             show_exit_modal: false,
-            lsp_status: LspStatus::Unknown,
+            lsp_status: ServerState::Undetected,
             opened_path: path.to_path_buf(),
         })
     }
@@ -73,7 +73,7 @@ impl EditorState {
             focus_tree: true,
             chord_input: String::new(),
             show_exit_modal: false,
-            lsp_status: LspStatus::Unknown,
+            lsp_status: ServerState::Undetected,
             opened_path: path.to_path_buf(),
         })
     }

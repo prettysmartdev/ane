@@ -6,16 +6,15 @@ use ratatui::{
     Frame,
 };
 
-use crate::data::lsp::types::LspStatus;
+use crate::data::lsp::types::ServerState;
 use crate::data::state::EditorState;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
     let lsp_color = match state.lsp_status {
-        LspStatus::Ready => Color::Green,
-        LspStatus::Failed => Color::Red,
-        LspStatus::NotInstalled => Color::Red,
-        LspStatus::Installing | LspStatus::Starting => Color::Yellow,
-        LspStatus::Unknown => Color::DarkGray,
+        ServerState::Running => Color::Green,
+        ServerState::Failed | ServerState::Missing => Color::Red,
+        ServerState::Installing | ServerState::Starting | ServerState::Available => Color::Yellow,
+        ServerState::Undetected | ServerState::Stopped => Color::DarkGray,
     };
 
     let lsp_span = Span::styled(

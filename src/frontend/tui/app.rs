@@ -1,7 +1,5 @@
 use std::io;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 use anyhow::Result;
 use crossterm::{
@@ -16,9 +14,9 @@ use ratatui::{
 };
 
 use crate::commands::chord;
-use crate::commands::lsp::client::LspClient;
+use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use crate::data::lsp::registry;
-use crate::data::lsp::types::{LspInitParams, LspStatus};
+use crate::data::lsp::types::Language;
 use crate::data::state::{EditorState, Mode};
 
 use super::command_bar;
@@ -37,9 +35,17 @@ pub fn run(path: &Path) -> Result<()> {
         EditorState::for_file(path)?
     };
 
-    let lsp_status = start_lsp_background(path);
-    if let Some(ref status) = lsp_status {
-        state.lsp_status = *status.lock().unwrap();
+    let mut engine = LspEngine::new(LspEngineConfig::default());
+    let root = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let files: Vec<&Path> = if path.is_file() { vec![path] } else { vec![] };
+    let _ = engine.start_for_context(&root, &files);
+
+    if let Some(lang) = primary_language(path) {
+        state.lsp_status = engine.server_state(lang);
     }
 
     enable_raw_mode()?;
@@ -48,70 +54,38 @@ pub fn run(path: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut frontend = TuiFrontend::new();
-    let result = event_loop(&mut terminal, &mut state, &mut frontend, &lsp_status);
+    let result = event_loop(&mut terminal, &mut state, &mut frontend, &mut engine);
 
+    engine.shutdown_all();
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
 
     result
 }
 
-fn start_lsp_background(path: &Path) -> Option<Arc<Mutex<LspStatus>>> {
+fn primary_language(path: &Path) -> Option<Language> {
     let root = if path.is_dir() {
         path.to_path_buf()
     } else {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
-
-    let lang = registry::detect_language_from_dir(&root)
-        .or_else(|| registry::detect_language_from_path(path))?;
-
-    let status = Arc::new(Mutex::new(LspStatus::Unknown));
-    let status_clone = Arc::clone(&status);
-
-    thread::spawn(move || {
-        let mut client = LspClient::new(lang);
-        let params = LspInitParams {
-            root_path: root,
-            language: lang,
-        };
-        match client.start(&params) {
-            Ok(()) => {
-                *status_clone.lock().unwrap() = LspStatus::Ready;
-                // Keep client alive — it holds the LSP process
-                loop {
-                    thread::sleep(std::time::Duration::from_secs(60));
-                }
-            }
-            Err(_) => {
-                let current = client.get_status();
-                *status_clone.lock().unwrap() = if current == LspStatus::NotInstalled {
-                    LspStatus::NotInstalled
-                } else {
-                    LspStatus::Failed
-                };
-            }
-        }
-    });
-
-    Some(status)
+    registry::detect_language_from_dir(&root).or_else(|| registry::detect_language_from_path(path))
 }
 
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
-    lsp_status: &Option<Arc<Mutex<LspStatus>>>,
+    engine: &mut LspEngine,
 ) -> Result<()> {
     loop {
-        if let Some(ref status) = lsp_status {
-            state.lsp_status = *status.lock().unwrap();
+        if let Some(lang) = primary_language(&state.opened_path) {
+            state.lsp_status = engine.server_state(lang);
         }
 
         terminal.draw(|frame| {
             let has_tree = state.file_tree.is_some();
 
-            // Main layout: content area + command bar + status bar
             let outer = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
