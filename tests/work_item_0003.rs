@@ -2,8 +2,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ane::commands::chord::{execute_chord, execute_chord_with_config, parse_chord};
-use ane::commands::lsp_engine::LspEngineConfig;
+use ane::commands::chord::{execute_chord, parse_chord};
+use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 
 const ANE_BIN: &str = env!("CARGO_BIN_EXE_ane");
 const MOCK_SERVER: &str = env!("CARGO_BIN_EXE_mock_lsp_server");
@@ -35,7 +35,8 @@ fn line_scope_exec_updates_file_and_does_not_start_lsp() {
     chord.args.target_line = Some(1);
     chord.args.value = Some("replaced".to_string());
 
-    let result = execute_chord_with_config(f.path(), &chord, failing_if_lsp_started).unwrap();
+    let mut lsp = LspEngine::new(failing_if_lsp_started);
+    let result = execute_chord(f.path(), &chord, &mut lsp).unwrap();
 
     assert!(
         result.modified.contains("replaced"),
@@ -80,7 +81,8 @@ fn lsp_scope_exec_with_mock_server_modifies_file() {
     chord.args.target_name = Some("main".to_string());
     chord.args.value = Some("// replaced by test".to_string());
 
-    let result = execute_chord_with_config(f.path(), &chord, config).unwrap();
+    let mut lsp = LspEngine::new(config);
+    let result = execute_chord(f.path(), &chord, &mut lsp).unwrap();
 
     assert!(
         result.modified.contains("// replaced by test"),
@@ -101,7 +103,7 @@ fn lsp_scope_exec_with_mock_server_modifies_file() {
 fn lsp_scope_exec_with_nonexistent_binary_returns_error_promptly() {
     // check_command="true" (server appears installed) but the binary doesn't exist.
     // The startup thread skips the installer and immediately tries to spawn the binary,
-    // which fails with ENOENT → Failed state.  execute_chord_with_config should return
+    // which fails with ENOENT → Failed state.  execute_chord should return
     // an error containing "failed to start" well within the 5-second budget.
     let config = LspEngineConfig::default()
         .with_startup_timeout(Duration::from_secs(5))
@@ -113,8 +115,9 @@ fn lsp_scope_exec_with_nonexistent_binary_returns_error_promptly() {
     chord.args.target_name = Some("main".to_string());
     chord.args.value = Some("// new".to_string());
 
+    let mut lsp = LspEngine::new(config);
     let started = Instant::now();
-    let result = execute_chord_with_config(f.path(), &chord, config);
+    let result = execute_chord(f.path(), &chord, &mut lsp);
     let elapsed = started.elapsed();
 
     assert!(result.is_err(), "expected an error, got Ok");
@@ -168,7 +171,8 @@ fn binary_file_rejected_with_nonzero_exit_and_stderr() {
     chord.args.target_line = Some(0);
     chord.args.value = Some("x".to_string());
 
-    let result = execute_chord(f.path(), &chord);
+    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    let result = execute_chord(f.path(), &chord, &mut lsp);
     assert!(result.is_err(), "expected error for binary file");
     // Buffer::from_file uses read_to_string which fails on non-UTF-8 content.
     // anyhow wraps the IO error with a "reading <path>" context message.
@@ -184,7 +188,8 @@ fn binary_file_error_message_matches_spec() {
     chord.args.target_line = Some(0);
     chord.args.value = Some("x".to_string());
 
-    let err = execute_chord(f.path(), &chord).unwrap_err();
+    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    let err = execute_chord(f.path(), &chord, &mut lsp).unwrap_err();
     let msg = err.to_string();
     assert!(msg.starts_with("file is not valid UTF-8: "), "got: {msg}");
     assert!(msg.contains(&f.path().display().to_string()), "got: {msg}");
@@ -227,7 +232,8 @@ fn out_of_range_line_returns_error() {
     chord.args.target_line = Some(100); // file has 3 lines (0-2)
     chord.args.value = Some("x".to_string());
 
-    let result = execute_chord(f.path(), &chord);
+    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    let result = execute_chord(f.path(), &chord, &mut lsp);
     assert!(result.is_err(), "expected error for out-of-range line");
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("out of range"), "error: {msg}");

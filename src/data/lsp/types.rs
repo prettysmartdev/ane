@@ -178,9 +178,23 @@ pub struct SemanticToken {
 }
 
 #[derive(Debug, Clone)]
+pub struct SelectionRange {
+    pub range: SymbolRange,
+    pub parent: Option<Box<SelectionRange>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallLine {
+    Stdout(String),
+    Stderr(String),
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct LspSharedState {
     pub status: ServerState,
     pub semantic_tokens: Vec<SemanticToken>,
+    pub install_line: Option<InstallLine>,
 }
 
 impl Default for LspSharedState {
@@ -188,6 +202,7 @@ impl Default for LspSharedState {
         Self {
             status: ServerState::Undetected,
             semantic_tokens: Vec::new(),
+            install_line: None,
         }
     }
 }

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Clear, Paragraph},
     Frame,
 };
 
@@ -26,6 +26,18 @@ fn token_type_color(token_type: &str) -> Color {
     }
 }
 
+fn expand_tabs(s: &str) -> String {
+    s.replace('\t', "    ")
+}
+
+fn display_col(line: &str, byte_idx: usize) -> usize {
+    let safe_idx = byte_idx.min(line.len());
+    line[..safe_idx]
+        .chars()
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
 fn styled_line_with_tokens<'a>(
     line_text: &'a str,
     line_num: usize,
@@ -35,7 +47,7 @@ fn styled_line_with_tokens<'a>(
     let line_tokens: Vec<&SemanticToken> = tokens.iter().filter(|t| t.line == line_num).collect();
 
     if line_tokens.is_empty() {
-        return vec![Span::styled(line_text.to_string(), base_style)];
+        return vec![Span::styled(expand_tabs(line_text), base_style)];
     }
 
     let mut spans = Vec::new();
@@ -48,13 +60,13 @@ fn styled_line_with_tokens<'a>(
 
         if start > pos {
             let text: String = chars[pos..start.min(chars.len())].iter().collect();
-            spans.push(Span::styled(text, base_style));
+            spans.push(Span::styled(expand_tabs(&text), base_style));
         }
 
         if start < chars.len() {
             let text: String = chars[start..end].iter().collect();
             let color = token_type_color(&token.token_type);
-            spans.push(Span::styled(text, Style::default().fg(color)));
+            spans.push(Span::styled(expand_tabs(&text), Style::default().fg(color)));
         }
 
         pos = end;
@@ -62,7 +74,7 @@ fn styled_line_with_tokens<'a>(
 
     if pos < chars.len() {
         let text: String = chars[pos..].iter().collect();
-        spans.push(Span::styled(text, base_style));
+        spans.push(Span::styled(expand_tabs(&text), base_style));
     }
 
     spans
@@ -75,6 +87,7 @@ pub fn render(
     lsp_status: ServerState,
     semantic_tokens: &[SemanticToken],
 ) {
+    frame.render_widget(Clear, area);
     match state.current_buffer() {
         Some(buf) => {
             let visible_height = area.height as usize;
@@ -117,7 +130,7 @@ pub fn render(
                         );
                         spans.extend(token_spans);
                     } else {
-                        spans.push(Span::styled(line_text.clone(), text_style));
+                        spans.push(Span::styled(expand_tabs(line_text), text_style));
                     }
 
                     Line::from(spans)
@@ -129,7 +142,15 @@ pub fn render(
 
             if state.mode == Mode::Edit && !state.focus_tree {
                 let cursor_row = state.cursor_line.saturating_sub(start);
-                let cursor_x = area.x + line_num_width as u16 + 1 + state.cursor_col as u16;
+                let current_line = buf
+                    .lines
+                    .get(state.cursor_line)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let cursor_x = area.x
+                    + line_num_width as u16
+                    + 1
+                    + display_col(current_line, state.cursor_col) as u16;
                 let cursor_y = area.y + cursor_row as u16;
                 if state.cursor_line >= start
                     && state.cursor_line < end
@@ -144,7 +165,15 @@ pub fn render(
                 && state.cursor_line < end
             {
                 let cursor_row = state.cursor_line - start;
-                let cursor_x = area.x + line_num_width as u16 + 1 + state.cursor_col as u16;
+                let current_line = buf
+                    .lines
+                    .get(state.cursor_line)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let cursor_x = area.x
+                    + line_num_width as u16
+                    + 1
+                    + display_col(current_line, state.cursor_col) as u16;
                 let cursor_y = area.y + cursor_row as u16;
                 if cursor_x < area.right() && cursor_y < area.bottom() {
                     let cursor_char = buf

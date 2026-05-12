@@ -9,6 +9,8 @@ use ratatui::{
 use crate::data::state::EditorState;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
+    let width = area.width as usize;
+
     let (name, dirty) = match state.current_buffer() {
         Some(buf) => {
             let name = buf
@@ -29,20 +31,32 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
         }
     };
 
-    let name_span = Span::styled(format!(" {name} "), Style::default().fg(Color::White));
-
-    let indicator = if dirty {
-        Span::styled("[+]", Style::default().fg(Color::Yellow))
+    let center_text = if dirty {
+        format!("[+] {name}")
     } else {
-        Span::raw("")
+        name.clone()
     };
 
-    let padding_len = area
-        .width
-        .saturating_sub(name.len() as u16 + 2 + if dirty { 3 } else { 0 });
-    let padding = Span::raw(" ".repeat(padding_len as usize));
+    let right_text = format!(" {}:{} ", state.cursor_line + 1, state.cursor_col + 1);
 
-    let line = Line::from(vec![name_span, padding, indicator]);
+    let center_len = center_text.len();
+    let right_len = right_text.len();
+
+    let center_start = width.saturating_sub(center_len) / 2;
+    let center_end = center_start + center_len;
+    let right_start = width.saturating_sub(right_len);
+
+    let left_pad = center_start;
+    let mid_pad = right_start.saturating_sub(center_end);
+
+    let spans = vec![
+        Span::styled(" ".repeat(left_pad), Style::default()),
+        Span::styled(center_text, Style::default().fg(Color::White)),
+        Span::styled(" ".repeat(mid_pad), Style::default()),
+        Span::styled(right_text, Style::default().fg(Color::DarkGray)),
+    ];
+
+    let line = Line::from(spans);
     let paragraph = Paragraph::new(line).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }

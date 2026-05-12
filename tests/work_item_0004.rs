@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::time::Duration;
 
-use ane::commands::chord::execute_chord_with_config;
+use ane::commands::chord::execute_chord;
 use ane::commands::chord_engine::ChordEngine;
-use ane::commands::lsp_engine::LspEngineConfig;
+use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use ane::data::chord_types::{Action, Component, Positional, Scope};
 
 const MOCK_SERVER: &str = env!("CARGO_BIN_EXE_mock_lsp_server");
@@ -58,7 +58,8 @@ fn auto_submit_short_cifn_apply_produces_nonempty_diff() {
         ChordEngine::try_auto_submit_short("cifn", 5, 0).expect("cifn is a valid 4-char chord");
     query.args.value = Some("new_main".to_string());
 
-    let result = execute_chord_with_config(f.path(), &query, config).unwrap();
+    let mut lsp = LspEngine::new(config);
+    let result = execute_chord(f.path(), &query, &mut lsp).unwrap();
     assert_ne!(
         result.original, result.modified,
         "expected a non-empty diff for cifn rename"

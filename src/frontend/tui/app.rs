@@ -11,15 +11,15 @@ use crossterm::{
     ExecutableCommand,
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     prelude::CrosstermBackend,
     Terminal,
 };
 
 use crate::commands::chord_engine::{parens_balanced, ChordEngine};
-use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
+use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
 use crate::data::lsp::registry;
-use crate::data::lsp::types::{Language, LspSharedState, SemanticToken, ServerState};
+use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
 use crate::data::state::{EditorState, Mode};
 
 use super::chord_box;
@@ -31,6 +31,25 @@ use super::tree_pane;
 use super::tui_frontend::TuiFrontend;
 
 use crate::frontend::traits::ApplyChordAction;
+
+struct TuiInstallProgress {
+    shared: Arc<Mutex<LspSharedState>>,
+}
+
+impl InstallProgress for TuiInstallProgress {
+    fn on_stdout(&self, line: &str) {
+        self.shared.lock().unwrap().install_line = Some(InstallLine::Stdout(line.to_string()));
+    }
+    fn on_stderr(&self, line: &str) {
+        self.shared.lock().unwrap().install_line = Some(InstallLine::Stderr(line.to_string()));
+    }
+    fn on_failed(&self, message: &str) {
+        self.shared.lock().unwrap().install_line = Some(InstallLine::Failed(message.to_string()));
+    }
+    fn on_complete(&self) {
+        self.shared.lock().unwrap().install_line = None;
+    }
+}
 
 pub fn run(path: &Path) -> Result<()> {
     let mut state = if path.is_dir() {
@@ -48,6 +67,10 @@ pub fn run(path: &Path) -> Result<()> {
     let files: Vec<&Path> = if path.is_file() { vec![path] } else { vec![] };
     {
         let mut eng = engine.lock().unwrap();
+        let progress: Arc<dyn InstallProgress> = Arc::new(TuiInstallProgress {
+            shared: Arc::clone(&state.lsp_state),
+        });
+        eng.set_install_progress(progress);
         let _ = eng.start_for_context(&root, &files);
     }
 
@@ -154,7 +177,6 @@ fn event_loop(
     token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
 ) -> Result<()> {
     let mut last_edit: Option<Instant> = None;
-    let mut initial_token_fetch_done = false;
 
     loop {
         let (lsp_status, semantic_tokens) = {
@@ -164,8 +186,7 @@ fn event_loop(
 
         adjust_scroll_offset(state, terminal.size()?.height);
 
-        if !initial_token_fetch_done && lsp_status == ServerState::Running {
-            initial_token_fetch_done = true;
+        if lsp_status == ServerState::Running && semantic_tokens.is_empty() {
             if let Some(buf) = state.current_buffer() {
                 let _ = token_tx.try_send((buf.path.clone(), buf.content()));
             }
@@ -214,8 +235,12 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16) {
         return;
     };
     let total = buf.line_count();
-    // Editor pane height = total - title (1) - status (1).
-    let visible = (term_height as usize).saturating_sub(2);
+    let chord_box_rows: usize = if state.mode == Mode::Chord && !state.focus_tree {
+        4
+    } else {
+        0
+    };
+    let visible = (term_height as usize).saturating_sub(2 + chord_box_rows);
     if visible == 0 {
         state.scroll_offset = 0;
         return;
@@ -272,10 +297,28 @@ fn draw(
     let status_area = v_layout[2];
 
     title_bar::render(frame, title_area, state);
-    editor_pane::render(frame, pane_area, state, *lsp_status, semantic_tokens);
+
+    let chord_box_visible = state.mode == Mode::Chord && !state.focus_tree;
+    let editor_render_area = if chord_box_visible {
+        Rect::new(
+            pane_area.x,
+            pane_area.y,
+            pane_area.width,
+            pane_area.height.saturating_sub(4),
+        )
+    } else {
+        pane_area
+    };
+    editor_pane::render(
+        frame,
+        editor_render_area,
+        state,
+        *lsp_status,
+        semantic_tokens,
+    );
     status_bar::render(frame, status_area, state, *lsp_status);
 
-    if state.mode == Mode::Chord && !state.focus_tree {
+    if chord_box_visible {
         chord_box::render(frame, pane_area, state);
     }
 
@@ -310,6 +353,15 @@ fn handle_key(
     // Priority 3: Ctrl-T always handled
     if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
         toggle_tree(state);
+        return false;
+    }
+
+    // Priority 3b: Ctrl-S always handled
+    if code == KeyCode::Char('s') && modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+            let _ = buf.write();
+        }
+        state.status_msg = "saved".into();
         return false;
     }
 
@@ -361,6 +413,7 @@ fn handle_open_modal(
             }
             if let Some(path) = state.pending_open_path.take() {
                 let _ = state.open_file(&path);
+                state.lsp_state.lock().unwrap().semantic_tokens.clear();
                 if let Some(buf) = state.current_buffer() {
                     let _ = token_tx.try_send((buf.path.clone(), buf.content()));
                 }
@@ -372,6 +425,7 @@ fn handle_open_modal(
                     buf.dirty = false;
                 }
                 let _ = state.open_file(&path);
+                state.lsp_state.lock().unwrap().semantic_tokens.clear();
                 if let Some(buf) = state.current_buffer() {
                     let _ = token_tx.try_send((buf.path.clone(), buf.content()));
                 }
@@ -432,6 +486,7 @@ fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     state.pending_open_path = Some(path);
                 } else {
                     let _ = state.open_file(&path);
+                    state.lsp_state.lock().unwrap().semantic_tokens.clear();
                 }
             }
         }
@@ -456,13 +511,28 @@ fn handle_chord_mode(
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
         }
-        KeyCode::Up => {
+        KeyCode::Up if state.chord_input.is_empty() => {
             state.cursor_line = state.cursor_line.saturating_sub(1);
         }
-        KeyCode::Down => {
+        KeyCode::Down if state.chord_input.is_empty() => {
             if let Some(buf) = state.current_buffer() {
                 if state.cursor_line + 1 < buf.line_count() {
                     state.cursor_line += 1;
+                }
+            }
+        }
+        KeyCode::Left if state.chord_input.is_empty() => {
+            state.cursor_col = state.cursor_col.saturating_sub(1);
+        }
+        KeyCode::Right if state.chord_input.is_empty() => {
+            if let Some(buf) = state.current_buffer() {
+                let max = buf
+                    .lines
+                    .get(state.cursor_line)
+                    .map(|l| l.len())
+                    .unwrap_or(0);
+                if state.cursor_col < max {
+                    state.cursor_col += 1;
                 }
             }
         }
@@ -570,14 +640,13 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             state.status_msg.clear();
             clear_chord(state);
         }
+        KeyCode::Esc => {
+            state.mode = Mode::Chord;
+            state.status_msg.clear();
+            clear_chord(state);
+        }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
-        }
-        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                let _ = buf.write();
-            }
-            state.status_msg = "saved".into();
         }
         KeyCode::Tab => {
             let line = state.cursor_line;

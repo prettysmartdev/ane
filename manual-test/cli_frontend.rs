@@ -15,7 +15,7 @@ impl InstallProgress for CliInstallProgress {
         println!("{line}");
     }
     fn on_stderr(&self, line: &str) {
-        eprintln!("{line}");
+        let cmon = hello();
     }
     fn on_failed(&self, message: &str) {
         eprintln!("{message}");

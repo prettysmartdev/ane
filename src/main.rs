@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use ane::commands::{chord, diff};
 use ane::frontend::cli::{self, Command};
 use ane::frontend::tui;
@@ -27,7 +28,9 @@ fn main() -> Result<()> {
 
 fn run_exec(chord_str: &str, path: &std::path::Path) -> Result<()> {
     let parsed = chord::parse_chord(chord_str)?;
-    let result = chord::execute_chord(path, &parsed)?;
+    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    lsp.set_install_progress(ane::frontend::cli_frontend::cli_install_progress());
+    let result = chord::execute_chord(path, &parsed, &mut lsp)?;
 
     for w in &result.warnings {
         eprintln!("warning: {w}");

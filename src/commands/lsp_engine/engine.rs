@@ -12,8 +12,10 @@ use serde_json::{json, Value};
 use crate::data::lsp::registry;
 use crate::data::lsp::types::{
     CompletionItem, DocumentSymbol, HoverInfo, Language, Location, LspEvent, LspServerInfo,
-    SemanticToken, ServerState, SymbolKind, SymbolRange,
+    SelectionRange, SemanticToken, ServerState, SymbolKind, SymbolRange,
 };
+
+use super::installer::InstallProgress;
 
 use super::detector;
 use super::health::{self, HealthStatus};
@@ -80,6 +82,7 @@ struct StartupContext {
     auto_install: bool,
     overrides: ServerOverrides,
     startup_timeout: Duration,
+    install_progress: Option<Arc<dyn InstallProgress>>,
 }
 
 struct ServerInstance {
@@ -130,8 +133,11 @@ pub struct LspEngine {
     config: LspEngineConfig,
     event_tx: mpsc::Sender<LspEvent>,
     event_rx: mpsc::Receiver<LspEvent>,
+    install_progress: Option<Arc<dyn InstallProgress>>,
     #[cfg(any(test, feature = "test-support"))]
     test_symbols: HashMap<PathBuf, Vec<DocumentSymbol>>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_selection_ranges: HashMap<(PathBuf, usize, usize), SelectionRange>,
 }
 
 impl LspEngine {
@@ -142,14 +148,37 @@ impl LspEngine {
             config,
             event_tx,
             event_rx,
+            install_progress: None,
             #[cfg(any(test, feature = "test-support"))]
             test_symbols: HashMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_selection_ranges: HashMap::new(),
         }
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn inject_test_symbols(&mut self, path: PathBuf, symbols: Vec<DocumentSymbol>) {
         self.test_symbols.insert(path, symbols);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_test_selection_range(
+        &mut self,
+        path: PathBuf,
+        line: usize,
+        col: usize,
+        sel_range: SelectionRange,
+    ) {
+        self.test_selection_ranges
+            .insert((path, line, col), sel_range);
+    }
+
+    pub fn set_install_progress(&mut self, progress: Arc<dyn InstallProgress>) {
+        self.install_progress = Some(progress);
+    }
+
+    pub fn startup_timeout(&self) -> Duration {
+        self.config.startup_timeout
     }
 
     pub fn start_for_context(&mut self, root_path: &Path, files: &[&Path]) -> Result<()> {
@@ -198,6 +227,7 @@ impl LspEngine {
                 check_command: self.config.check_command_override.clone(),
             },
             startup_timeout: self.config.startup_timeout,
+            install_progress: self.install_progress.clone(),
         };
 
         thread::spawn(move || {
@@ -303,7 +333,7 @@ impl LspEngine {
             bail!("could not transition to Installing");
         }
 
-        match installer::install(server_info) {
+        match installer::install(server_info, self.install_progress.as_ref()) {
             Ok(()) => {
                 try_transition(&state, lang, ServerState::Available, &event_tx);
                 Ok(())
@@ -472,6 +502,30 @@ impl LspEngine {
         let params = json!({ "textDocument": { "uri": uri } });
         let result = self.send_request(lang, "textDocument/semanticTokens/full", params)?;
         parse_semantic_tokens(&result)
+    }
+
+    pub fn selection_range(
+        &mut self,
+        file_path: &Path,
+        line: usize,
+        col: usize,
+    ) -> Result<SelectionRange> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(sr) = self
+            .test_selection_ranges
+            .get(&(file_path.to_path_buf(), line, col))
+        {
+            return Ok(sr.clone());
+        }
+        let lang = self.language_for_file(file_path)?;
+        self.ensure_open(lang, file_path)?;
+        let uri = path_to_uri(file_path);
+        let params = json!({
+            "textDocument": { "uri": uri },
+            "positions": [{ "line": line, "character": col }]
+        });
+        let result = self.send_request(lang, "textDocument/selectionRange", params)?;
+        parse_selection_range(&result)
     }
 
     // --- Internal Methods ---
@@ -722,7 +776,7 @@ fn startup_thread(
     if !installed {
         if ctx.auto_install {
             try_transition(&state, lang, ServerState::Installing, &event_tx);
-            if let Err(e) = installer::install(server_info) {
+            if let Err(e) = installer::install(server_info, ctx.install_progress.as_ref()) {
                 try_transition(&state, lang, ServerState::Failed, &event_tx);
                 let _ = event_tx.send(LspEvent::Error {
                     language: lang,
@@ -1184,6 +1238,26 @@ fn parse_location(value: &Value) -> Option<Location> {
     let range = parse_range(loc.get("range")?)?;
 
     Some(Location { file_path, range })
+}
+
+fn parse_selection_range(value: &Value) -> Result<SelectionRange> {
+    let item = if let Some(arr) = value.as_array() {
+        arr.first()
+            .ok_or_else(|| anyhow::anyhow!("empty selectionRange response"))?
+    } else {
+        value
+    };
+    parse_selection_range_node(item)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse selectionRange"))
+}
+
+fn parse_selection_range_node(value: &Value) -> Option<SelectionRange> {
+    let range = parse_range(value.get("range")?)?;
+    let parent = value
+        .get("parent")
+        .filter(|v| !v.is_null())
+        .and_then(|v| parse_selection_range_node(v).map(Box::new));
+    Some(SelectionRange { range, parent })
 }
 
 #[cfg(test)]

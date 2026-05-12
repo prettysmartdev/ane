@@ -76,13 +76,7 @@ fn resolve_scope(
             lsp,
             &[SymbolKind::Function, SymbolKind::Method],
         ),
-        Scope::Variable => resolve_lsp_scope(
-            query,
-            buffer_name,
-            buffer,
-            lsp,
-            &[SymbolKind::Variable, SymbolKind::Const],
-        ),
+        Scope::Variable => resolve_variable_scope(query, buffer_name, buffer, lsp),
         Scope::Struct => resolve_lsp_scope(
             query,
             buffer_name,
@@ -203,6 +197,11 @@ fn resolve_lsp_scope(
         if let Some(sym) = find_symbol_at_position_by_kind(&symbols, line, col, target_kinds) {
             return Ok(symbol_to_range(&sym.range));
         }
+        if matches!(query.scope, Scope::Variable) {
+            if let Some(sym) = find_symbol_on_line_by_kind(&symbols, line, target_kinds) {
+                return Ok(symbol_to_range(&sym.range));
+            }
+        }
         return Err(ChordError::resolve(
             buffer_name,
             format!("no matching symbol at cursor position ({line}, {col})"),
@@ -300,6 +299,123 @@ fn resolve_member_scope(
     .into())
 }
 
+fn resolve_variable_scope(
+    query: &ChordQuery,
+    buffer_name: &str,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+) -> Result<TextRange> {
+    let target_kinds = &[SymbolKind::Variable, SymbolKind::Const];
+    let path = Path::new(buffer_name);
+
+    if query.args.target_name.is_some() {
+        return resolve_lsp_scope(query, buffer_name, buffer, lsp, target_kinds);
+    }
+
+    let (line, col) = query.args.cursor_pos.ok_or_else(|| {
+        ChordError::resolve(
+            buffer_name,
+            "variable scope requires a cursor position or target name",
+        )
+    })?;
+
+    if let Ok(symbols) = lsp.document_symbols(path) {
+        if matches!(query.positional, Positional::Next | Positional::Previous) {
+            if let Some(sym) =
+                find_neighbor_symbol(&symbols, line, col, target_kinds, query.positional)
+            {
+                return Ok(symbol_to_range(&sym.range));
+            }
+            return Err(ChordError::resolve(
+                buffer_name,
+                format!(
+                    "no {} variable found from cursor ({line}, {col})",
+                    if query.positional == Positional::Next {
+                        "next"
+                    } else {
+                        "previous"
+                    }
+                ),
+            )
+            .into());
+        }
+
+        let var_pos = find_symbol_at_position_by_kind(&symbols, line, col, target_kinds)
+            .or_else(|| find_symbol_on_line_by_kind(&symbols, line, target_kinds))
+            .map(|sym| (sym.range.start_line, sym.range.start_col));
+
+        if let Some((var_line, var_col)) = var_pos {
+            if let Ok(sel) = lsp.selection_range(path, var_line, var_col) {
+                if let Some(range) = find_enclosing_declaration(&sel) {
+                    return Ok(range);
+                }
+            }
+        }
+    }
+
+    resolve_variable_scope_via_selection_range(query, buffer_name, buffer, lsp)
+}
+
+fn find_enclosing_declaration(sel: &crate::data::lsp::types::SelectionRange) -> Option<TextRange> {
+    let inner = &sel.range;
+    let mut current = sel;
+    while let Some(ref parent) = current.parent {
+        let r = &parent.range;
+        let starts_before = r.start_line < inner.start_line
+            || (r.start_line == inner.start_line && r.start_col < inner.start_col);
+        let ends_after = r.end_line > inner.end_line
+            || (r.end_line == inner.end_line && r.end_col > inner.end_col);
+        if starts_before || ends_after {
+            return Some(symbol_to_range(r));
+        }
+        current = parent;
+    }
+    None
+}
+
+fn resolve_variable_scope_via_selection_range(
+    query: &ChordQuery,
+    buffer_name: &str,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+) -> Result<TextRange> {
+    let (line, col) = query.args.cursor_pos.ok_or_else(|| {
+        ChordError::resolve(
+            buffer_name,
+            "variable scope requires a cursor position or target name",
+        )
+    })?;
+
+    let path = Path::new(buffer_name);
+    let sel = lsp
+        .selection_range(path, line, col)
+        .map_err(|e| ChordError::resolve(buffer_name, format!("LSP selectionRange failed: {e}")))?;
+
+    let mut current = &sel;
+    loop {
+        let range = symbol_to_range(&current.range);
+        let text = extract_range_text(buffer, &range);
+        let trimmed = text.trim_start();
+        if trimmed.starts_with("let ")
+            || trimmed.starts_with("let\t")
+            || trimmed.starts_with("const ")
+            || trimmed.starts_with("static ")
+        {
+            return Ok(range);
+        }
+        match current.parent {
+            Some(ref parent) => current = parent,
+            None => break,
+        }
+    }
+
+    Err(ChordError::resolve(
+        buffer_name,
+        format!("no enclosing variable declaration found at cursor ({line}, {col})"),
+    )
+    .into())
+}
+
 fn resolve_component(
     query: &ChordQuery,
     buffer: &Buffer,
@@ -315,7 +431,7 @@ fn resolve_component(
         Component::Contents => resolve_contents_component(query, buffer, scope_range, buffer_name),
         Component::End => Ok(TextRange::point(scope_range.end_line, scope_range.end_col)),
         Component::Self_ => Ok(*scope_range),
-        Component::Name => resolve_name_component(query, buffer_name, lsp, scope_range),
+        Component::Name => resolve_name_component(query, buffer, buffer_name, lsp, scope_range),
         Component::Value => resolve_value_component(query, buffer, scope_range, buffer_name),
         Component::Parameters => resolve_parameters_component(buffer, scope_range, buffer_name),
         Component::Arguments => {
@@ -326,6 +442,7 @@ fn resolve_component(
 
 fn resolve_name_component(
     query: &ChordQuery,
+    buffer: &Buffer,
     buffer_name: &str,
     lsp: &mut LspEngine,
     scope_range: &TextRange,
@@ -357,12 +474,28 @@ fn resolve_name_component(
     }
 
     if let Some((line, col)) = query.args.cursor_pos {
-        if let Some(sym) = find_innermost_symbol(&symbols, line, col) {
-            return Ok(symbol_name_range(sym));
+        let target_kinds = scope_to_symbol_kinds(query.scope);
+        if !target_kinds.is_empty() {
+            if let Some(sym) = find_symbol_in_range(&symbols, scope_range, &target_kinds) {
+                return Ok(symbol_name_range(sym));
+            }
         }
+
+        if let Some(sym) = find_innermost_symbol(&symbols, line, col) {
+            if target_kinds.is_empty() || matches_kind(&sym.kind, &target_kinds) {
+                return Ok(symbol_name_range(sym));
+            }
+        }
+
+        if query.scope == Scope::Variable {
+            if let Some(range) = extract_variable_name_from_text(buffer, scope_range) {
+                return Ok(range);
+            }
+        }
+
         return Err(ChordError::resolve(
             buffer_name,
-            format!("no symbol at cursor ({line}, {col}) for Name component"),
+            format!("no matching symbol at cursor ({line}, {col}) for Name component"),
         )
         .into());
     }
@@ -372,6 +505,87 @@ fn resolve_name_component(
         "Name component requires either a target name or cursor position",
     )
     .into())
+}
+
+fn scope_to_symbol_kinds(scope: Scope) -> Vec<SymbolKind> {
+    match scope {
+        Scope::Function => vec![SymbolKind::Function, SymbolKind::Method],
+        Scope::Variable => vec![SymbolKind::Variable, SymbolKind::Const],
+        Scope::Struct => vec![SymbolKind::Struct, SymbolKind::Enum],
+        _ => vec![],
+    }
+}
+
+fn find_symbol_in_range<'a>(
+    symbols: &'a [DocumentSymbol],
+    range: &TextRange,
+    kinds: &[SymbolKind],
+) -> Option<&'a DocumentSymbol> {
+    for sym in symbols {
+        if matches_kind(&sym.kind, kinds) && symbol_within_range(&sym.range, range) {
+            return Some(sym);
+        }
+        if let Some(found) = find_symbol_in_range(&sym.children, range, kinds) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn symbol_within_range(
+    sym_range: &crate::data::lsp::types::SymbolRange,
+    outer: &TextRange,
+) -> bool {
+    let after_start = sym_range.start_line > outer.start_line
+        || (sym_range.start_line == outer.start_line && sym_range.start_col >= outer.start_col);
+    let before_end = sym_range.end_line < outer.end_line
+        || (sym_range.end_line == outer.end_line && sym_range.end_col <= outer.end_col);
+    after_start && before_end
+}
+
+fn extract_variable_name_from_text(buffer: &Buffer, scope_range: &TextRange) -> Option<TextRange> {
+    let text = extract_range_text(buffer, scope_range);
+    let keywords = ["let", "const", "static", "mut"];
+    let mut pos = 0;
+    let chars: Vec<char> = text.chars().collect();
+    loop {
+        while pos < chars.len() && !chars[pos].is_alphanumeric() && chars[pos] != '_' {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            return None;
+        }
+        let start = pos;
+        while pos < chars.len() && (chars[pos].is_alphanumeric() || chars[pos] == '_') {
+            pos += 1;
+        }
+        let word: String = chars[start..pos].iter().collect();
+        if !keywords.contains(&word.as_str()) {
+            let abs_col = if scope_range.start_line == scope_range.end_line {
+                scope_range.start_col + start
+            } else {
+                let newlines_before = text
+                    [..chars[..start].iter().map(|c| c.len_utf8()).sum::<usize>()]
+                    .matches('\n')
+                    .count();
+                if newlines_before == 0 {
+                    scope_range.start_col + start
+                } else {
+                    start
+                        - text[..chars[..start].iter().map(|c| c.len_utf8()).sum::<usize>()]
+                            .rfind('\n')
+                            .map(|i| i + 1)
+                            .unwrap_or(0)
+                }
+            };
+            return Some(TextRange {
+                start_line: scope_range.start_line,
+                start_col: abs_col,
+                end_line: scope_range.start_line,
+                end_col: abs_col + (pos - start),
+            });
+        }
+    }
 }
 
 fn resolve_value_component(
@@ -731,6 +945,22 @@ fn find_symbol_at_position_by_kind<'a>(
     best
 }
 
+fn find_symbol_on_line_by_kind<'a>(
+    symbols: &'a [DocumentSymbol],
+    line: usize,
+    kinds: &[SymbolKind],
+) -> Option<&'a DocumentSymbol> {
+    for sym in symbols {
+        if matches_kind(&sym.kind, kinds) && sym.range.start_line == line {
+            return Some(sym);
+        }
+        if let Some(found) = find_symbol_on_line_by_kind(&sym.children, line, kinds) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn find_innermost_symbol(
     symbols: &[DocumentSymbol],
     line: usize,
@@ -914,13 +1144,14 @@ fn scan_balanced(
 
 /// Find the first standalone `=` (not part of `==`, `<=`, `>=`, `!=`) in the
 /// scope and return the range from after it to the end of the scope.
-fn find_assignment_rhs(
-    buffer: &Buffer,
-    scope_range: &TextRange,
-    buffer_name: &str,
-) -> Result<TextRange> {
-    let content = extract_range_text(buffer, scope_range);
-    let chars: Vec<char> = content.chars().collect();
+fn find_assignment_in_text(
+    text: &str,
+    base_line: usize,
+    base_col: usize,
+    end_line: usize,
+    end_col: usize,
+) -> Option<TextRange> {
+    let chars: Vec<char> = text.chars().collect();
     let mut byte_offset = 0usize;
     let mut char_idx = 0usize;
     while char_idx < chars.len() {
@@ -937,29 +1168,60 @@ fn find_assignment_rhs(
                 Some('!' | '<' | '>' | '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^')
             ) || next == Some('=');
             if !is_compound {
-                let lines_before = content[..byte_offset].matches('\n').count();
-                let line_start = content[..byte_offset]
-                    .rfind('\n')
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
-                let col_in_line = content[line_start..byte_offset].chars().count();
-                let abs_line = scope_range.start_line + lines_before;
+                let lines_before = text[..byte_offset].matches('\n').count();
+                let line_start = text[..byte_offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let col_in_line = text[line_start..byte_offset].chars().count();
+                let abs_line = base_line + lines_before;
                 let abs_col = if lines_before == 0 {
-                    scope_range.start_col + col_in_line
+                    base_col + col_in_line
                 } else {
                     col_in_line
                 };
-                return Ok(TextRange {
+                return Some(TextRange {
                     start_line: abs_line,
                     start_col: abs_col + 1,
-                    end_line: scope_range.end_line,
-                    end_col: scope_range.end_col,
+                    end_line,
+                    end_col,
                 });
             }
         }
         byte_offset += c.len_utf8();
         char_idx += 1;
     }
+    None
+}
+
+fn find_assignment_rhs(
+    buffer: &Buffer,
+    scope_range: &TextRange,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    let content = extract_range_text(buffer, scope_range);
+    if let Some(range) = find_assignment_in_text(
+        &content,
+        scope_range.start_line,
+        scope_range.start_col,
+        scope_range.end_line,
+        scope_range.end_col,
+    ) {
+        return Ok(range);
+    }
+
+    // The scope range may only cover the variable name (e.g. from documentSymbol).
+    // Expand to the full line and retry.
+    if scope_range.start_line == scope_range.end_line {
+        let line_idx = scope_range.start_line;
+        if let Some(line) = buffer.lines.get(line_idx) {
+            let line_end = line_char_count(line);
+            if let Some(mut range) = find_assignment_in_text(line, line_idx, 0, line_idx, line_end)
+            {
+                range.end_line = line_idx;
+                range.end_col = line_end;
+                return Ok(range);
+            }
+        }
+    }
+
     Err(ChordError::resolve(buffer_name, "variable has no value (no assignment found)").into())
 }
 
@@ -1092,7 +1354,7 @@ mod tests {
     use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
     use crate::data::buffer::Buffer;
     use crate::data::chord_types::{Action, Component, Positional, Scope};
-    use crate::data::lsp::types::{DocumentSymbol, SymbolKind, SymbolRange};
+    use crate::data::lsp::types::{DocumentSymbol, SelectionRange, SymbolKind, SymbolRange};
 
     use super::*;
 
@@ -1481,6 +1743,22 @@ mod tests {
         };
         let range = find_assignment_rhs(&buffer, &scope, "/buf").unwrap();
         assert_eq!(range.start_col, 7); // position after the first `=` (idx 6)
+    }
+
+    #[test]
+    fn find_assignment_rhs_expands_to_line_when_scope_is_name_only() {
+        let buffer = buf(&["    let asdf = dude();"]);
+        // Scope covers only the variable name "asdf" (cols 8-12)
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 8,
+            end_line: 0,
+            end_col: 12,
+        };
+        let range = find_assignment_rhs(&buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 14); // after the `=` at col 13
+        assert_eq!(range.end_col, 22); // end of line
     }
 
     // --- find_member_value ---
@@ -2385,5 +2663,633 @@ mod tests {
         assert_eq!(target.start_col, 11);
         assert_eq!(target.end_line, 2);
         assert_eq!(target.end_col, 11);
+    }
+
+    // --- variable scope via selectionRange fallback ---
+
+    fn sel_range(
+        sl: usize,
+        sc: usize,
+        el: usize,
+        ec: usize,
+        parent: Option<SelectionRange>,
+    ) -> SelectionRange {
+        SelectionRange {
+            range: SymbolRange {
+                start_line: sl,
+                start_col: sc,
+                end_line: el,
+                end_col: ec,
+            },
+            parent: parent.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn variable_scope_selection_range_simple_let() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let x = 42;", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // selectionRange hierarchy: x(1,8-9) → let x = 42;(1,4-15) → block(0,10-2,1)
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 15, Some(block));
+        let ident = sel_range(1, 8, 1, 9, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 8, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 8)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 1);
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_line, 1);
+        assert_eq!(res.scope_range.end_col, 15);
+    }
+
+    #[test]
+    fn variable_scope_selection_range_value_component() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let name = \"hello\";", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 22, Some(block));
+        let ident = sel_range(1, 8, 1, 12, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 8, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Value,
+            None,
+            None,
+            Some((1, 8)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.component_range.start_col, 14);
+    }
+
+    #[test]
+    fn variable_scope_selection_range_const() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["const MAX: usize = 100;"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![]);
+        // selectionRange: MAX(0,6-9) → const MAX: usize = 100;(0,0-23) → file
+        let file = sel_range(0, 0, 0, 23, None);
+        let const_stmt = sel_range(0, 0, 0, 23, Some(file));
+        let ident = sel_range(0, 6, 0, 9, Some(const_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 0, 6, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 6)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 0);
+        assert_eq!(res.scope_range.start_col, 0);
+        assert_eq!(res.scope_range.end_col, 23);
+    }
+
+    #[test]
+    fn variable_scope_selection_range_multiline() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "fn main() {",
+                "    let v = vec![",
+                "        1, 2, 3,",
+                "    ];",
+                "}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 4, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // selectionRange: v(1,8-9) → let v = vec![...];(1,4-3,6) → block
+        let block = sel_range(0, 10, 4, 1, None);
+        let let_stmt = sel_range(1, 4, 3, 6, Some(block));
+        let ident = sel_range(1, 8, 1, 9, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 8, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 8)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 1);
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_line, 3);
+        assert_eq!(res.scope_range.end_col, 6);
+    }
+
+    #[test]
+    fn variable_scope_selection_range_cursor_on_keyword() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let params = some_value;", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // Cursor on 'let' keyword: let(1,4-7) → let params = some_value;(1,4-27) → block
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 27, Some(block));
+        let keyword = sel_range(1, 4, 1, 7, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 5, keyword);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 5)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 1);
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_line, 1);
+        assert_eq!(res.scope_range.end_col, 27);
+    }
+
+    #[test]
+    fn variable_scope_prefers_selection_range_over_narrow_document_symbol() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let asdf = dude();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // documentSymbol returns variable with name-only range (rust-analyzer behavior)
+        let var_sym = sym("asdf", SymbolKind::Variable, 1, 8, 1, 12);
+        let main_fn = sym_with_children("main", SymbolKind::Function, 0, 0, 2, 1, vec![var_sym]);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // selectionRange gives full declaration
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 21, Some(block));
+        let ident = sel_range(1, 8, 1, 12, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 9, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Value,
+            None,
+            None,
+            Some((1, 9)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_col, 21);
+        assert_eq!(res.component_range.start_col, 14);
+    }
+
+    #[test]
+    fn variable_scope_selection_range_cursor_on_value() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let x = 42;", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // Cursor on '42': 42(1,12-14) → let x = 42;(1,4-15) → block
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 15, Some(block));
+        let literal = sel_range(1, 12, 1, 14, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 12, literal);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Value,
+            None,
+            None,
+            Some((1, 12)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 1);
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_line, 1);
+        assert_eq!(res.scope_range.end_col, 15);
+    }
+
+    #[test]
+    fn variable_name_component_finds_variable_not_function() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let asdf = dude();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // documentSymbol returns variable as child of function (rust-analyzer behavior)
+        let var_sym = sym("asdf", SymbolKind::Variable, 1, 8, 1, 12);
+        let main_fn = sym_with_children("main", SymbolKind::Function, 0, 0, 2, 1, vec![var_sym]);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 21, Some(block));
+        let ident = sel_range(1, 8, 1, 12, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 9, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 9)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.component_range.start_line, 1);
+        assert_eq!(res.component_range.start_col, 8);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn variable_name_component_cursor_on_value_side() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let asdf = dude();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // documentSymbol has variable with name-only range
+        let var_sym = sym("asdf", SymbolKind::Variable, 1, 8, 1, 12);
+        let main_fn = sym_with_children("main", SymbolKind::Function, 0, 0, 2, 1, vec![var_sym]);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        // cursor on 'dude' — selectionRange for scope resolution
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 21, Some(block));
+        let call = sel_range(1, 15, 1, 21, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 15, call);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 15)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Scope should be the full let statement, not dude()
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_col, 21);
+        // Name should be "asdf", not "main" or "dude"
+        assert_eq!(res.component_range.start_col, 8);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn variable_name_text_fallback_when_no_symbol() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn main() {", "    let asdf = dude();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // documentSymbol has NO variable symbol — only function
+        let main_fn = sym("main", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        let block = sel_range(0, 10, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 21, Some(block));
+        let ident = sel_range(1, 8, 1, 12, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 9, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 9)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.component_range.start_col, 8);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn variable_name_text_fallback_const() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["const MAX: usize = 100;"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![]);
+        let file = sel_range(0, 0, 0, 23, None);
+        let const_stmt = sel_range(0, 0, 0, 23, Some(file));
+        let ident = sel_range(0, 6, 0, 9, Some(const_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 0, 7, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((0, 7)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.component_range.start_col, 6);
+        assert_eq!(res.component_range.end_col, 9);
+    }
+
+    #[test]
+    fn variable_name_text_fallback_let_mut() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn f() {", "    let mut count = 0;", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("f", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        let block = sel_range(0, 7, 2, 1, None);
+        let let_stmt = sel_range(1, 4, 1, 21, Some(block));
+        let ident = sel_range(1, 12, 1, 17, Some(let_stmt));
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 13, ident);
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 13)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // "count" is at cols 12-17
+        assert_eq!(res.component_range.start_col, 12);
+        assert_eq!(res.component_range.end_col, 17);
+    }
+
+    // --- Real rust-analyzer selectionRange hierarchy tests ---
+    // These mirror the actual hierarchy from rust-analyzer (verified empirically):
+    //   cursor_point → ident/keyword → [intermediate exprs] → let-statement → block → fn → file
+
+    fn real_sel_hierarchy_at_let(line: usize) -> SelectionRange {
+        // cursor on 'let' at (line,4):
+        // (l,4)..(l,4) → (l,4)..(l,7) [let kw] → (l,4)..(l,23) [stmt] → block → fn → file
+        let file = sel_range(0, 0, 3, 0, None);
+        let func = sel_range(0, 0, 2, 1, Some(file));
+        let block = sel_range(0, 12, 2, 1, Some(func));
+        let stmt = sel_range(line, 4, line, 23, Some(block));
+        let keyword = sel_range(line, 4, line, 7, Some(stmt));
+        sel_range(line, 4, line, 4, Some(keyword))
+    }
+
+    fn real_sel_hierarchy_at_name(line: usize) -> SelectionRange {
+        // cursor on 'cmon' at (line,12):
+        // (l,8)..(l,8) → (l,8)..(l,12) [ident] → (l,4)..(l,23) [stmt] → block → fn → file
+        let file = sel_range(0, 0, 3, 0, None);
+        let func = sel_range(0, 0, 2, 1, Some(file));
+        let block = sel_range(0, 12, 2, 1, Some(func));
+        let stmt = sel_range(line, 4, line, 23, Some(block));
+        let ident = sel_range(line, 8, line, 12, Some(stmt));
+        sel_range(line, 8, line, 8, Some(ident))
+    }
+
+    fn real_sel_hierarchy_at_rhs(line: usize) -> SelectionRange {
+        // cursor on 'hello' at (line,15):
+        // (l,15)..(l,15) → (l,15)..(l,20) [hello ident] → (l,15)..(l,22) [hello() call]
+        //   → (l,4)..(l,23) [stmt] → block → fn → file
+        let file = sel_range(0, 0, 3, 0, None);
+        let func = sel_range(0, 0, 2, 1, Some(file));
+        let block = sel_range(0, 12, 2, 1, Some(func));
+        let stmt = sel_range(line, 4, line, 23, Some(block));
+        let call = sel_range(line, 15, line, 22, Some(stmt));
+        let ident = sel_range(line, 15, line, 20, Some(call));
+        sel_range(line, 15, line, 15, Some(ident))
+    }
+
+    #[test]
+    fn real_lsp_variable_scope_cursor_on_let() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 4, real_sel_hierarchy_at_let(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_line, 1);
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_col, 23);
+    }
+
+    #[test]
+    fn real_lsp_variable_scope_cursor_on_name() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 8, real_sel_hierarchy_at_name(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 8)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_col, 23);
+    }
+
+    #[test]
+    fn real_lsp_variable_scope_cursor_on_rhs() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 15, real_sel_hierarchy_at_rhs(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Self_,
+            None,
+            None,
+            Some((1, 15)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_col, 4);
+        assert_eq!(res.scope_range.end_col, 23);
+    }
+
+    #[test]
+    fn real_lsp_variable_name_cursor_on_let() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 4, real_sel_hierarchy_at_let(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Name should be "cmon" at cols 8-12
+        assert_eq!(res.component_range.start_col, 8);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn real_lsp_variable_name_cursor_on_rhs() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 15, real_sel_hierarchy_at_rhs(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Name,
+            None,
+            None,
+            Some((1, 15)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Name should be "cmon" at cols 8-12, not "hello"
+        assert_eq!(res.component_range.start_col, 8);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn real_lsp_variable_value_cursor_on_let() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 4, real_sel_hierarchy_at_let(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Value,
+            None,
+            None,
+            Some((1, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Value starts after '=' at col 14
+        assert_eq!(res.component_range.start_col, 14);
+        assert_eq!(res.component_range.end_col, 23);
+    }
+
+    #[test]
+    fn real_lsp_variable_value_cursor_on_rhs() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn on_stderr() {", "    let cmon = hello();", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let main_fn = sym("on_stderr", SymbolKind::Function, 0, 0, 2, 1);
+        let mut lsp = mock_lsp(path, vec![main_fn]);
+        lsp.inject_test_selection_range(PathBuf::from(path), 1, 15, real_sel_hierarchy_at_rhs(1));
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Value,
+            None,
+            None,
+            Some((1, 15)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.component_range.start_col, 14);
+        assert_eq!(res.component_range.end_col, 23);
     }
 }

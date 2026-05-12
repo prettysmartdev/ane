@@ -10,7 +10,7 @@ use crate::data::lsp::types::ServerState;
 
 use super::chord_engine::types::{ChordArgs, ChordQuery};
 use super::chord_engine::ChordEngine;
-use super::lsp_engine::{LspEngine, LspEngineConfig};
+use super::lsp_engine::LspEngine;
 
 pub fn parse_chord(input: &str) -> Result<ChordQuery> {
     ChordEngine::parse(input)
@@ -34,15 +34,7 @@ pub struct ChordResult {
     pub yanked: Option<String>,
 }
 
-pub fn execute_chord(path: &Path, chord: &ChordQuery) -> Result<ChordResult> {
-    execute_chord_with_config(path, chord, LspEngineConfig::default())
-}
-
-pub fn execute_chord_with_config(
-    path: &Path,
-    chord: &ChordQuery,
-    lsp_config: LspEngineConfig,
-) -> Result<ChordResult> {
+pub fn execute_chord(path: &Path, chord: &ChordQuery, lsp: &mut LspEngine) -> Result<ChordResult> {
     if !path.exists() {
         bail!("file not found: {}", path.display());
     }
@@ -66,10 +58,8 @@ pub fn execute_chord_with_config(
         );
     }
 
-    let lsp_timeout = lsp_config.startup_timeout;
-    let mut lsp = LspEngine::new(lsp_config);
-
     if chord.requires_lsp {
+        let lsp_timeout = lsp.startup_timeout();
         let lang = registry::detect_language_from_path(&abs_path).ok_or_else(|| {
             anyhow::anyhow!("no language server available for {}", path.display())
         })?;
@@ -96,7 +86,7 @@ pub fn execute_chord_with_config(
         }
     }
 
-    let resolved = ChordEngine::resolve(&chord, &buffers, &mut lsp)?;
+    let resolved = ChordEngine::resolve(&chord, &buffers, lsp)?;
     let actions = ChordEngine::patch(&resolved, &buffers)?;
 
     if let Some(action) = actions.get(&path_str) {
@@ -180,6 +170,7 @@ fn resolve_stdin_sentinels(chord: &mut ChordQuery) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::lsp_engine::LspEngineConfig;
     use crate::data::chord_types::{Action, Component, Positional, Scope};
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -188,6 +179,10 @@ mod tests {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f
+    }
+
+    fn default_engine() -> LspEngine {
+        LspEngine::new(LspEngineConfig::default())
     }
 
     // --- strip_trailing_newline ---
@@ -240,7 +235,11 @@ mod tests {
     #[test]
     fn error_message_file_not_found_exact_format() {
         let chord = parse_chord("cels").unwrap();
-        let result = execute_chord(Path::new("/nonexistent/path/does-not-exist.rs"), &chord);
+        let result = execute_chord(
+            Path::new("/nonexistent/path/does-not-exist.rs"),
+            &chord,
+            &mut default_engine(),
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -259,7 +258,7 @@ mod tests {
 
         let chord = parse_chord("cifc").unwrap(); // ChangeInsideFunctionContents, requires_lsp=true
                                                   // No target_name or cursor_pos set → error before LSP starts
-        let result = execute_chord(f_rs.path(), &chord);
+        let result = execute_chord(f_rs.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -273,7 +272,7 @@ mod tests {
         // Non-LSP scope without args must also be rejected.
         let f = temp_file("hello\n");
         let chord = parse_chord("cels").unwrap();
-        let result = execute_chord(f.path(), &chord);
+        let result = execute_chord(f.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -293,7 +292,7 @@ mod tests {
         let mut chord = parse_chord("cifc").unwrap();
         chord.args.target_name = Some("some_fn".to_string());
 
-        let result = execute_chord(f.path(), &chord);
+        let result = execute_chord(f.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no language server available"), "got: {msg}");
@@ -389,7 +388,7 @@ mod tests {
         let mut chord = parse_chord("cels").unwrap();
         chord.args.target_line = Some(1);
         chord.args.value = Some("xxx".to_string());
-        let result = execute_chord(f.path(), &chord).unwrap();
+        let result = execute_chord(f.path(), &chord, &mut default_engine()).unwrap();
         assert!(result.modified.contains("xxx"));
         assert!(!result.modified.contains("bbb"));
     }
@@ -399,7 +398,7 @@ mod tests {
         let f = temp_file("aaa\nbbb\nccc");
         let mut chord = parse_chord("dels").unwrap();
         chord.args.target_line = Some(1);
-        let result = execute_chord(f.path(), &chord).unwrap();
+        let result = execute_chord(f.path(), &chord, &mut default_engine()).unwrap();
         assert!(!result.modified.contains("bbb"));
         assert!(result.modified.contains("aaa"));
         assert!(result.modified.contains("ccc"));

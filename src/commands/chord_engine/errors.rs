@@ -1,6 +1,14 @@
 use std::fmt;
+use std::path::Path;
 
 use crate::data::chord_types::{Component, Scope};
+
+fn filename(buffer_name: &str) -> &str {
+    Path::new(buffer_name)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(buffer_name)
+}
 
 #[derive(Debug)]
 pub enum ChordError {
@@ -53,7 +61,8 @@ impl fmt::Display for ChordError {
                 message,
                 available_symbols,
             } => {
-                write!(f, "chord resolve error in {buffer_name}: {message}")?;
+                let name = filename(buffer_name);
+                write!(f, "chord resolve error in {name}: {message}")?;
                 if !available_symbols.is_empty() {
                     write!(f, "\n  available symbols: {}", available_symbols.join(", "))?;
                 }
@@ -63,7 +72,8 @@ impl fmt::Display for ChordError {
                 buffer_name,
                 message,
             } => {
-                write!(f, "chord patch error in {buffer_name}: {message}")
+                let name = filename(buffer_name);
+                write!(f, "chord patch error in {name}: {message}")
             }
             ChordError::LspRequired { scope, lsp_state } => {
                 write!(
@@ -190,6 +200,6 @@ mod tests {
     fn resolve_with_no_symbols_omits_candidate_line() {
         let err = ChordError::resolve("/tmp/foo.rs", "boom");
         let msg = err.to_string();
-        assert_eq!(msg, "chord resolve error in /tmp/foo.rs: boom");
+        assert_eq!(msg, "chord resolve error in foo.rs: boom");
     }
 }
