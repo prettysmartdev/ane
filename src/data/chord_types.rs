@@ -36,6 +36,7 @@ pub enum Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Component {
     Beginning,
+    Contents,
     End,
     Value,
     Parameters,
@@ -133,6 +134,7 @@ impl Component {
     pub fn short(&self) -> &'static str {
         match self {
             Self::Beginning => "b",
+            Self::Contents => "c",
             Self::End => "e",
             Self::Value => "v",
             Self::Parameters => "p",
@@ -145,6 +147,7 @@ impl Component {
     pub fn from_short(s: &str) -> Option<Self> {
         match s {
             "b" => Some(Self::Beginning),
+            "c" => Some(Self::Contents),
             "e" => Some(Self::End),
             "v" => Some(Self::Value),
             "p" => Some(Self::Parameters),
@@ -158,17 +161,18 @@ impl Component {
 
 pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     match (scope, component) {
-        (_, Component::Beginning | Component::End | Component::Name | Component::Self_) => true,
-        (Scope::Line, Component::Value | Component::Parameters | Component::Arguments) => false,
-        (Scope::Buffer, Component::Value | Component::Parameters | Component::Arguments) => false,
-        (Scope::Function, Component::Value | Component::Parameters) => true,
-        (Scope::Function, Component::Arguments) => true,
+        (_, Component::End | Component::Name | Component::Self_) => true,
+        (Scope::Line | Scope::Buffer, Component::Beginning) => true,
+        (_, Component::Beginning) => false,
+        (Scope::Function | Scope::Struct, Component::Contents) => true,
+        (_, Component::Contents) => false,
+        (Scope::Line | Scope::Buffer, Component::Value) => false,
+        (Scope::Function | Scope::Struct, Component::Value) => false,
         (Scope::Variable, Component::Value) => true,
-        (Scope::Variable, Component::Parameters | Component::Arguments) => false,
-        (Scope::Struct, Component::Value) => true,
-        (Scope::Struct, Component::Parameters | Component::Arguments) => false,
         (Scope::Member, Component::Value) => true,
-        (Scope::Member, Component::Parameters | Component::Arguments) => false,
+        (Scope::Function, Component::Parameters) => true,
+        (Scope::Function, Component::Arguments) => true,
+        (_, Component::Parameters | Component::Arguments) => false,
     }
 }
 
@@ -218,6 +222,7 @@ impl fmt::Display for Component {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Beginning => write!(f, "Beginning"),
+            Self::Contents => write!(f, "Contents"),
             Self::End => write!(f, "End"),
             Self::Value => write!(f, "Value"),
             Self::Parameters => write!(f, "Parameters"),
@@ -284,6 +289,7 @@ mod tests {
     fn component_short_round_trip() {
         for component in [
             Component::Beginning,
+            Component::Contents,
             Component::End,
             Component::Value,
             Component::Parameters,
@@ -309,11 +315,12 @@ mod tests {
     #[test]
     fn valid_combinations() {
         assert!(is_valid_combination(Scope::Function, Component::Parameters));
-        assert!(is_valid_combination(Scope::Function, Component::Value));
         assert!(is_valid_combination(Scope::Variable, Component::Value));
-        assert!(is_valid_combination(Scope::Struct, Component::Value));
         assert!(is_valid_combination(Scope::Member, Component::Value));
+        assert!(is_valid_combination(Scope::Function, Component::Contents));
+        assert!(is_valid_combination(Scope::Struct, Component::Contents));
         assert!(is_valid_combination(Scope::Line, Component::Beginning));
+        assert!(is_valid_combination(Scope::Buffer, Component::Beginning));
         assert!(is_valid_combination(Scope::Line, Component::End));
         assert!(is_valid_combination(Scope::Line, Component::Self_));
     }
@@ -322,7 +329,13 @@ mod tests {
     fn invalid_combinations() {
         assert!(!is_valid_combination(Scope::Line, Component::Parameters));
         assert!(!is_valid_combination(Scope::Line, Component::Value));
+        assert!(!is_valid_combination(Scope::Line, Component::Contents));
+        assert!(!is_valid_combination(Scope::Buffer, Component::Contents));
         assert!(!is_valid_combination(Scope::Buffer, Component::Parameters));
+        assert!(!is_valid_combination(Scope::Variable, Component::Contents));
+        assert!(!is_valid_combination(Scope::Function, Component::Beginning));
+        assert!(!is_valid_combination(Scope::Function, Component::Value));
+        assert!(!is_valid_combination(Scope::Struct, Component::Value));
         assert!(!is_valid_combination(
             Scope::Variable,
             Component::Parameters
@@ -335,7 +348,7 @@ mod tests {
         let actions = ["c", "r", "d", "y", "a", "p", "i"];
         let positionals = ["i", "u", "a", "b", "n", "p", "e", "o"];
         let scopes = ["l", "b", "f", "v", "s", "m"];
-        let components = ["b", "e", "v", "p", "a", "n", "s"];
+        let components = ["b", "c", "e", "v", "p", "a", "n", "s"];
         for set in [&actions[..], &positionals[..], &scopes[..], &components[..]] {
             let mut seen = std::collections::HashSet::new();
             for s in set {
@@ -356,6 +369,7 @@ mod tests {
         ];
         let components = [
             Component::Beginning,
+            Component::Contents,
             Component::End,
             Component::Value,
             Component::Parameters,

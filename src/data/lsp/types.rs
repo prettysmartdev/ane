@@ -89,6 +89,7 @@ pub struct DocumentSymbol {
     pub name: String,
     pub kind: SymbolKind,
     pub range: SymbolRange,
+    pub selection_range: Option<SymbolRange>,
     pub children: Vec<DocumentSymbol>,
 }
 

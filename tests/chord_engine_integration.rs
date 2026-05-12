@@ -6,6 +6,7 @@ use ane::commands::chord_engine::types::{ChordAction, DiffLine};
 use ane::commands::chord_engine::ChordEngine;
 use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use ane::data::buffer::Buffer;
+use ane::data::lsp::types::{DocumentSymbol, SymbolKind, SymbolRange};
 
 fn make_buffer(path: &str, content: &str) -> Buffer {
     Buffer {
@@ -87,7 +88,7 @@ fn full_pipeline_append_after_line_end() {
 #[test]
 fn full_pipeline_prepend_before_line_beginning() {
     let action = run(
-        r#"palb(line:0, value:">>> ")"#,
+        r#"pels(line:0, value:">>> ")"#,
         "/buf",
         "original text\nline two",
     );
@@ -312,4 +313,123 @@ fn cli_execute_chord_yank_does_not_modify_file() {
 
     let on_disk = std::fs::read_to_string(f.path()).unwrap();
     assert_eq!(on_disk, content);
+}
+
+// --- Function-scoped chords with mock LSP ---
+
+fn run_with_lsp(
+    chord: &str,
+    path: &str,
+    content: &str,
+    symbols: Vec<DocumentSymbol>,
+) -> ChordAction {
+    let buffers = single_buffer(path, content);
+    let mut lsp = LspEngine::new(LspEngineConfig::default());
+    lsp.inject_test_symbols(PathBuf::from(path), symbols);
+    let mut actions = ChordEngine::execute(chord, &buffers, &mut lsp).unwrap();
+    actions.remove(path).unwrap()
+}
+
+fn fn_sym(
+    name: &str,
+    sl: usize,
+    sc: usize,
+    el: usize,
+    ec: usize,
+    sel_sl: usize,
+    sel_sc: usize,
+    sel_el: usize,
+    sel_ec: usize,
+) -> DocumentSymbol {
+    DocumentSymbol {
+        name: name.to_string(),
+        kind: SymbolKind::Function,
+        range: SymbolRange {
+            start_line: sl,
+            start_col: sc,
+            end_line: el,
+            end_col: ec,
+        },
+        selection_range: Some(SymbolRange {
+            start_line: sel_sl,
+            start_col: sel_sc,
+            end_line: sel_el,
+            end_col: sel_ec,
+        }),
+        children: vec![],
+    }
+}
+
+#[test]
+fn cifn_renames_function() {
+    let action = run_with_lsp(
+        r#"cifn(function:foo, value:"bar")"#,
+        "/test.rs",
+        "fn foo() { 42 }",
+        vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
+    );
+    let diff = action.diff.as_ref().unwrap();
+    assert!(
+        diff.modified.contains("fn bar() { 42 }"),
+        "got: {}",
+        diff.modified
+    );
+}
+
+#[test]
+fn cifc_replaces_function_contents() {
+    let action = run_with_lsp(
+        r#"cifc(function:foo, value:" 99 ")"#,
+        "/test.rs",
+        "fn foo() { 42 }",
+        vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
+    );
+    let diff = action.diff.as_ref().unwrap();
+    assert!(
+        diff.modified.contains("fn foo() { 99 }"),
+        "got: {}",
+        diff.modified
+    );
+}
+
+#[test]
+fn cifc_long_form_replaces_function_contents() {
+    let action = run_with_lsp(
+        r#"ChangeInsideFunctionContents(function:foo, value:" 99 ")"#,
+        "/test.rs",
+        "fn foo() { 42 }",
+        vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
+    );
+    let diff = action.diff.as_ref().unwrap();
+    assert!(
+        diff.modified.contains("fn foo() { 99 }"),
+        "got: {}",
+        diff.modified
+    );
+}
+
+#[test]
+fn cbfs_replaces_text_before_function() {
+    let action = run_with_lsp(
+        r#"cbfs(function:foo, value:"// header ")"#,
+        "/test.rs",
+        "use std::io;\n\nfn foo() { 42 }",
+        vec![fn_sym("foo", 2, 0, 2, 15, 2, 3, 2, 6)],
+    );
+    let diff = action.diff.as_ref().unwrap();
+    assert!(
+        diff.modified.contains("// header "),
+        "got: {}",
+        diff.modified
+    );
+    assert!(
+        !diff.modified.contains("use std::io;"),
+        "got: {}",
+        diff.modified
+    );
+    assert!(
+        diff.modified.contains("fn foo() { 42 }"),
+        "got: {}",
+        diff.modified
+    );
 }

@@ -153,6 +153,7 @@ impl ChordError {
 fn valid_components_for_scope(scope: Scope) -> Vec<Component> {
     let all = [
         Component::Beginning,
+        Component::Contents,
         Component::End,
         Component::Value,
         Component::Parameters,

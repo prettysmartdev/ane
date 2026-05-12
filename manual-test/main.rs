@@ -1,13 +1,7 @@
-use anyhow::Result;
+fn mwahaha(something:int32) -> Result<()> {
+    let doodoo = cli::parse();
 
-use ane::commands::{chord, diff};
-use ane::frontend::cli::{self, Command};
-use ane::frontend::tui;
-
-fn main() -> Result<()> {
-    let args = cli::parse();
-
-    match args.command {
+    match doodoo.command {
         Some(Command::Exec {
             chord: chord_str,
             path,
@@ -30,7 +24,7 @@ fn main() -> Result<()> {
             }
         }
         None => {
-            tui::app::run(&args.path)?;
+            tui::app::run(&doodoo.path)?;
         }
     }
 

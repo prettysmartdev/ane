@@ -130,7 +130,7 @@ pub struct LspEngine {
     config: LspEngineConfig,
     event_tx: mpsc::Sender<LspEvent>,
     event_rx: mpsc::Receiver<LspEvent>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_symbols: HashMap<PathBuf, Vec<DocumentSymbol>>,
 }
 
@@ -142,12 +142,12 @@ impl LspEngine {
             config,
             event_tx,
             event_rx,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_symbols: HashMap::new(),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_test_symbols(&mut self, path: PathBuf, symbols: Vec<DocumentSymbol>) {
         self.test_symbols.insert(path, symbols);
     }
@@ -353,7 +353,7 @@ impl LspEngine {
     // --- LSP Query Methods ---
 
     pub fn document_symbols(&mut self, file_path: &Path) -> Result<Vec<DocumentSymbol>> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(syms) = self.test_symbols.get(file_path) {
             return Ok(syms.clone());
         }
@@ -941,10 +941,13 @@ fn parse_single_symbol(value: &Value) -> Option<DocumentSymbol> {
         .map(|arr| arr.iter().filter_map(parse_single_symbol).collect())
         .unwrap_or_default();
 
+    let selection_range = value.get("selectionRange").and_then(parse_range);
+
     Some(DocumentSymbol {
         name,
         kind: convert_symbol_kind(kind_num),
         range,
+        selection_range,
         children,
     })
 }
@@ -1182,6 +1185,7 @@ mod tests {
                 end_line: 10,
                 end_col: 1,
             },
+            selection_range: None,
             children: vec![DocumentSymbol {
                 name: "inner".to_string(),
                 kind: SymbolKind::Variable,
@@ -1191,6 +1195,7 @@ mod tests {
                     end_line: 3,
                     end_col: 20,
                 },
+                selection_range: None,
                 children: vec![],
             }],
         };
@@ -1209,6 +1214,7 @@ mod tests {
                 end_line: 10,
                 end_col: 1,
             },
+            selection_range: None,
             children: vec![],
         };
         let result = find_symbol_at_position(&[sym], 5, 0);
@@ -1226,6 +1232,7 @@ mod tests {
                 end_line: 5,
                 end_col: 1,
             },
+            selection_range: None,
             children: vec![],
         };
         let result = find_symbol_at_position(&[sym], 10, 0);

@@ -257,7 +257,7 @@ mod tests {
         f_rs.write_all(b"fn main() {}").unwrap();
         f_rs.flush().unwrap();
 
-        let chord = parse_chord("cifv").unwrap(); // ChangeInsideFunctionValue, requires_lsp=true
+        let chord = parse_chord("cifc").unwrap(); // ChangeInsideFunctionContents, requires_lsp=true
                                                   // No target_name or cursor_pos set → error before LSP starts
         let result = execute_chord(f_rs.path(), &chord);
         assert!(result.is_err());
@@ -290,7 +290,7 @@ mod tests {
         f.write_all(b"some content").unwrap();
         f.flush().unwrap();
 
-        let mut chord = parse_chord("cifv").unwrap();
+        let mut chord = parse_chord("cifc").unwrap();
         chord.args.target_name = Some("some_fn".to_string());
 
         let result = execute_chord(f.path(), &chord);
@@ -300,22 +300,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_short_form_cifv() {
-        let parsed = parse_chord("cifv").unwrap();
+    fn parse_short_form_cifc() {
+        let parsed = parse_chord("cifc").unwrap();
         assert_eq!(parsed.action, Action::Change);
         assert_eq!(parsed.positional, Positional::Inside);
         assert_eq!(parsed.scope, Scope::Function);
-        assert_eq!(parsed.component, Component::Value);
+        assert_eq!(parsed.component, Component::Contents);
         assert!(parsed.requires_lsp);
     }
 
     #[test]
     fn parse_long_form() {
-        let parsed = parse_chord("ChangeInsideFunctionValue").unwrap();
+        let parsed = parse_chord("ChangeInsideFunctionContents").unwrap();
         assert_eq!(parsed.action, Action::Change);
         assert_eq!(parsed.positional, Positional::Inside);
         assert_eq!(parsed.scope, Scope::Function);
-        assert_eq!(parsed.component, Component::Value);
+        assert_eq!(parsed.component, Component::Contents);
         assert!(parsed.requires_lsp);
     }
 
@@ -348,12 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_yank_entire_function_value() {
-        let parsed = parse_chord("yefv").unwrap();
+    fn parse_yank_entire_function_contents() {
+        let parsed = parse_chord("yefc").unwrap();
         assert_eq!(parsed.action, Action::Yank);
         assert_eq!(parsed.positional, Positional::Entire);
         assert_eq!(parsed.scope, Scope::Function);
-        assert_eq!(parsed.component, Component::Value);
+        assert_eq!(parsed.component, Component::Contents);
         assert!(parsed.requires_lsp);
     }
 

@@ -312,6 +312,7 @@ fn resolve_component(
             scope_range.start_line,
             scope_range.start_col,
         )),
+        Component::Contents => resolve_contents_component(query, buffer, scope_range, buffer_name),
         Component::End => Ok(TextRange::point(scope_range.end_line, scope_range.end_col)),
         Component::Self_ => Ok(*scope_range),
         Component::Name => resolve_name_component(query, buffer_name, lsp, scope_range),
@@ -346,7 +347,7 @@ fn resolve_name_component(
 
     if let Some(ref name) = query.args.target_name {
         if let Some(sym) = find_symbol_by_name_recursive(&symbols, name) {
-            return Ok(symbol_to_range(&sym.range));
+            return Ok(symbol_name_range(sym));
         }
         return Err(ChordError::resolve(
             buffer_name,
@@ -357,7 +358,7 @@ fn resolve_name_component(
 
     if let Some((line, col)) = query.args.cursor_pos {
         if let Some(sym) = find_innermost_symbol(&symbols, line, col) {
-            return Ok(symbol_to_range(&sym.range));
+            return Ok(symbol_name_range(sym));
         }
         return Err(ChordError::resolve(
             buffer_name,
@@ -380,10 +381,13 @@ fn resolve_value_component(
     buffer_name: &str,
 ) -> Result<TextRange> {
     match query.scope {
-        Scope::Function | Scope::Struct => find_brace_range(buffer, scope_range, buffer_name),
         Scope::Variable => find_assignment_rhs(buffer, scope_range, buffer_name),
         Scope::Member => find_member_value(buffer, scope_range, buffer_name),
-        Scope::Line | Scope::Buffer => Ok(*scope_range),
+        _ => Err(ChordError::resolve(
+            buffer_name,
+            format!("Value component is not valid for {} scope", query.scope),
+        )
+        .into()),
     }
 }
 
@@ -477,18 +481,40 @@ fn apply_positional(
             }
         }
         Positional::Entire => Ok(vec![*component_range]),
-        Positional::After => Ok(vec![TextRange {
-            start_line: component_range.end_line,
-            start_col: component_range.end_col,
-            end_line: scope_range.end_line,
-            end_col: scope_range.end_col,
-        }]),
-        Positional::Before => Ok(vec![TextRange {
-            start_line: scope_range.start_line,
-            start_col: scope_range.start_col,
-            end_line: component_range.start_line,
-            end_col: component_range.start_col,
-        }]),
+        Positional::After => {
+            let (end_line, end_col) = if query.component == Component::Self_ {
+                let last = buffer.line_count().saturating_sub(1);
+                (
+                    last,
+                    buffer
+                        .lines
+                        .get(last)
+                        .map(|l| line_char_count(l))
+                        .unwrap_or(0),
+                )
+            } else {
+                (scope_range.end_line, scope_range.end_col)
+            };
+            Ok(vec![TextRange {
+                start_line: component_range.end_line,
+                start_col: component_range.end_col,
+                end_line,
+                end_col,
+            }])
+        }
+        Positional::Before => {
+            let (start_line, start_col) = if query.component == Component::Self_ {
+                (0, 0)
+            } else {
+                (scope_range.start_line, scope_range.start_col)
+            };
+            Ok(vec![TextRange {
+                start_line,
+                start_col,
+                end_line: component_range.start_line,
+                end_col: component_range.start_col,
+            }])
+        }
         Positional::Until => {
             let cursor = query.args.cursor_pos.ok_or_else(|| {
                 ChordError::resolve(buffer_name, "'Until' positional requires a cursor position")
@@ -597,6 +623,30 @@ fn resolve_cursor_and_mode(
 }
 
 // --- Helper functions ---
+
+fn resolve_contents_component(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    scope_range: &TextRange,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    match query.scope {
+        Scope::Function | Scope::Struct => find_brace_range(buffer, scope_range, buffer_name),
+        _ => Err(ChordError::resolve(
+            buffer_name,
+            format!("Contents component is not valid for {} scope", query.scope),
+        )
+        .into()),
+    }
+}
+
+fn symbol_name_range(sym: &DocumentSymbol) -> TextRange {
+    if let Some(ref sr) = sym.selection_range {
+        symbol_to_range(sr)
+    } else {
+        symbol_to_range(&sym.range)
+    }
+}
 
 fn symbol_to_range(sr: &crate::data::lsp::types::SymbolRange) -> TextRange {
     TextRange {
@@ -1108,6 +1158,38 @@ mod tests {
                 end_line: el,
                 end_col: ec,
             },
+            selection_range: None,
+            children: vec![],
+        }
+    }
+
+    fn sym_sel(
+        name: &str,
+        kind: SymbolKind,
+        sl: usize,
+        sc: usize,
+        el: usize,
+        ec: usize,
+        sel_sl: usize,
+        sel_sc: usize,
+        sel_el: usize,
+        sel_ec: usize,
+    ) -> DocumentSymbol {
+        DocumentSymbol {
+            name: name.to_string(),
+            kind,
+            range: SymbolRange {
+                start_line: sl,
+                start_col: sc,
+                end_line: el,
+                end_col: ec,
+            },
+            selection_range: Some(SymbolRange {
+                start_line: sel_sl,
+                start_col: sel_sc,
+                end_line: sel_el,
+                end_col: sel_ec,
+            }),
             children: vec![],
         }
     }
@@ -1130,6 +1212,7 @@ mod tests {
                 end_line: el,
                 end_col: ec,
             },
+            selection_range: None,
             children,
         }
     }
@@ -2136,5 +2219,170 @@ mod tests {
         let res_b = resolved.resolutions.get(path_b).unwrap();
         assert_eq!(res_a.scope_range.start_line, 1);
         assert_eq!(res_b.scope_range.start_line, 1);
+    }
+
+    // --- cifn: ChangeInFunctionName ---
+
+    #[test]
+    fn cifn_with_selection_range_targets_identifier() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() { 42 }"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // selection_range covers just "foo" (cols 3..6)
+        let mut lsp = mock_lsp(
+            path,
+            vec![sym_sel(
+                "foo",
+                SymbolKind::Function,
+                0,
+                0,
+                0,
+                15,
+                0,
+                3,
+                0,
+                6,
+            )],
+        );
+
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Name,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 3);
+        assert_eq!(target.end_col, 6);
+    }
+
+    // --- cifc: ChangeInsideFunctionContents ---
+
+    #[test]
+    fn cifc_resolves_to_brace_contents() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() { 42 }"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 0, 0, 0, 15)]);
+
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        // Contents for Function finds brace block {..}, Inside shrinks past braces
+        // "fn foo() { 42 }"  braces at 9..15, inside = 10..14
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 10);
+        assert_eq!(target.end_col, 14);
+    }
+
+    #[test]
+    fn cifc_multiline_resolves_contents() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {", "    42", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 0, 0, 2, 1)]);
+
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        // brace block: (0,9)..(2,1), inside shrinks to (0,10)..(2,0)
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 10);
+        assert_eq!(target.end_line, 2);
+        assert_eq!(target.end_col, 0);
+    }
+
+    // --- cbfs: ChangeBeforeFunctionSelf ---
+
+    #[test]
+    fn cbfs_targets_text_before_function() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["use std::io;", "", "fn foo() { 42 }"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 2, 0, 2, 15)]);
+
+        let q = query(
+            Action::Change,
+            Positional::Before,
+            Scope::Function,
+            Component::Self_,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        // Before Self_ uses buffer start (0,0) to function start (2,0)
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 0);
+        assert_eq!(target.end_line, 2);
+        assert_eq!(target.end_col, 0);
+    }
+
+    #[test]
+    fn after_function_self_targets_text_after_function() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {}", "", "fn bar() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("foo", SymbolKind::Function, 0, 0, 0, 11),
+                sym("bar", SymbolKind::Function, 2, 0, 2, 11),
+            ],
+        );
+
+        let q = query(
+            Action::Change,
+            Positional::After,
+            Scope::Function,
+            Component::Self_,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        // After Self_ uses function end (0,11) to buffer end (2,11)
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 11);
+        assert_eq!(target.end_line, 2);
+        assert_eq!(target.end_col, 11);
     }
 }

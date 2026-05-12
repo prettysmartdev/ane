@@ -274,6 +274,7 @@ fn parse_long_scope(input: &str) -> Option<(Scope, &str)> {
 fn parse_long_component(input: &str) -> Option<Component> {
     match input {
         "Beginning" => Some(Component::Beginning),
+        "Contents" => Some(Component::Contents),
         "End" => Some(Component::End),
         "Value" => Some(Component::Value),
         "Parameters" => Some(Component::Parameters),
@@ -293,7 +294,7 @@ fn suggest_chord(input: &str) -> Option<String> {
     let actions = ['c', 'r', 'd', 'y', 'a', 'p', 'i'];
     let positionals = ['i', 'u', 'a', 'b', 'n', 'p', 'e', 'o'];
     let scopes = ['l', 'b', 'f', 'v', 's', 'm'];
-    let components = ['b', 'e', 'v', 'p', 'a', 'n', 's'];
+    let components = ['b', 'c', 'e', 'v', 'p', 'a', 'n', 's'];
 
     let mut best_dist = usize::MAX;
     let mut best = None;
@@ -382,6 +383,7 @@ mod tests {
 
     const ALL_COMPONENTS: &[Component] = &[
         Component::Beginning,
+        Component::Contents,
         Component::End,
         Component::Value,
         Component::Parameters,
@@ -454,12 +456,12 @@ mod tests {
     }
 
     #[test]
-    fn spot_check_change_inside_function_value() {
-        let q = parse("cifv").unwrap();
+    fn spot_check_change_inside_function_contents() {
+        let q = parse("cifc").unwrap();
         assert_eq!(q.action, Action::Change);
         assert_eq!(q.positional, Positional::Inside);
         assert_eq!(q.scope, Scope::Function);
-        assert_eq!(q.component, Component::Value);
+        assert_eq!(q.component, Component::Contents);
         assert!(q.requires_lsp);
     }
 
@@ -494,12 +496,13 @@ mod tests {
     }
 
     #[test]
-    fn spot_check_prepend_before_buffer_beginning() {
-        let q = parse("pbbb").unwrap();
-        assert_eq!(q.action, Action::Prepend);
-        assert_eq!(q.positional, Positional::Before);
-        assert_eq!(q.scope, Scope::Buffer);
-        assert_eq!(q.component, Component::Beginning);
+    fn spot_check_buffer_contents_is_invalid() {
+        assert!(parse("pbbc").is_err());
+    }
+
+    #[test]
+    fn spot_check_change_inside_function_beginning_is_invalid() {
+        assert!(parse("cifb").is_err());
     }
 
     #[test]
@@ -522,8 +525,8 @@ mod tests {
 
     #[test]
     fn short_form_and_long_form_equivalent() {
-        let short = parse("cifv").unwrap();
-        let long = parse("ChangeInsideFunctionValue").unwrap();
+        let short = parse("cifc").unwrap();
+        let long = parse("ChangeInsideFunctionContents").unwrap();
         assert_eq!(short.action, long.action);
         assert_eq!(short.positional, long.positional);
         assert_eq!(short.scope, long.scope);
@@ -532,7 +535,7 @@ mod tests {
 
     #[test]
     fn args_function_key() {
-        let q = parse("cifv(function:getData)").unwrap();
+        let q = parse("cifc(function:getData)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert!(q.args.target_line.is_none());
         assert!(q.args.cursor_pos.is_none());
@@ -559,7 +562,7 @@ mod tests {
 
     #[test]
     fn args_name_key_alias() {
-        let q = parse("cifv(name:myFunc)").unwrap();
+        let q = parse("cifc(name:myFunc)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("myFunc"));
     }
 
@@ -590,7 +593,7 @@ mod tests {
 
     #[test]
     fn args_value_quoted_with_spaces() {
-        let q = parse(r#"cifv(function:getData, value:"new body goes here")"#).unwrap();
+        let q = parse(r#"cifc(function:getData, value:"new body goes here")"#).unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert_eq!(q.args.value.as_deref(), Some("new body goes here"));
     }
@@ -621,7 +624,7 @@ mod tests {
 
     #[test]
     fn args_multiple_keys() {
-        let q = parse(r#"cifv(function:getData, value:"body", line:5)"#).unwrap();
+        let q = parse(r#"cifc(function:getData, value:"body", line:5)"#).unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert_eq!(q.args.value.as_deref(), Some("body"));
         assert_eq!(q.args.target_line, Some(5));
@@ -701,11 +704,11 @@ mod tests {
 
     #[test]
     fn whitespace_trimmed_around_chord() {
-        let q = parse("  cifv  ").unwrap();
+        let q = parse("  cifc  ").unwrap();
         assert_eq!(q.action, Action::Change);
         assert_eq!(q.positional, Positional::Inside);
         assert_eq!(q.scope, Scope::Function);
-        assert_eq!(q.component, Component::Value);
+        assert_eq!(q.component, Component::Contents);
     }
 
     #[test]
