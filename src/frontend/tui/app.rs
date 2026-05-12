@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -14,16 +16,17 @@ use ratatui::{
     Terminal,
 };
 
-use crate::commands::chord_engine::ChordEngine;
+use crate::commands::chord_engine::{parens_balanced, ChordEngine};
 use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use crate::data::lsp::registry;
-use crate::data::lsp::types::Language;
+use crate::data::lsp::types::{Language, LspSharedState, SemanticToken, ServerState};
 use crate::data::state::{EditorState, Mode};
 
-use super::command_bar;
+use super::chord_box;
 use super::editor_pane;
 use super::exit_modal;
 use super::status_bar;
+use super::title_bar;
 use super::tree_pane;
 use super::tui_frontend::TuiFrontend;
 
@@ -36,17 +39,40 @@ pub fn run(path: &Path) -> Result<()> {
         EditorState::for_file(path)?
     };
 
-    let mut engine = LspEngine::new(LspEngineConfig::default());
+    let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
     let root = if path.is_dir() {
         path.to_path_buf()
     } else {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
     let files: Vec<&Path> = if path.is_file() { vec![path] } else { vec![] };
-    let _ = engine.start_for_context(&root, &files);
+    {
+        let mut eng = engine.lock().unwrap();
+        let _ = eng.start_for_context(&root, &files);
+    }
 
-    if let Some(lang) = primary_language(path) {
-        state.lsp_status = engine.server_state(lang);
+    let detected_lang = primary_language(path);
+    if let Some(lang) = detected_lang {
+        let eng = engine.lock().unwrap();
+        let server_state = eng.server_state(lang);
+        state.lsp_state.lock().unwrap().status = server_state;
+    }
+
+    let lsp_shared = Arc::clone(&state.lsp_state);
+    let (token_tx, token_rx) = std::sync::mpsc::sync_channel::<(std::path::PathBuf, String)>(1);
+
+    if let Some(lang) = detected_lang {
+        let poll_engine = Arc::clone(&engine);
+        let poll_shared = Arc::clone(&lsp_shared);
+        std::thread::spawn(move || {
+            status_polling_task(poll_engine, poll_shared, lang);
+        });
+
+        let tok_engine = Arc::clone(&engine);
+        let tok_shared = Arc::clone(&lsp_shared);
+        std::thread::spawn(move || {
+            token_request_task(tok_engine, tok_shared, token_rx);
+        });
     }
 
     enable_raw_mode()?;
@@ -55,13 +81,60 @@ pub fn run(path: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut frontend = TuiFrontend::new();
-    let result = event_loop(&mut terminal, &mut state, &mut frontend, &mut engine);
+    let result = event_loop(&mut terminal, &mut state, &mut frontend, &engine, &token_tx);
 
-    engine.shutdown_all();
+    {
+        let mut eng = engine.lock().unwrap();
+        eng.shutdown_all();
+    }
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
 
     result
+}
+
+fn status_polling_task(
+    engine: Arc<Mutex<LspEngine>>,
+    shared: Arc<Mutex<LspSharedState>>,
+    lang: Language,
+) {
+    loop {
+        let current = {
+            let eng = engine.lock().unwrap();
+            eng.server_state(lang)
+        };
+
+        {
+            let mut s = shared.lock().unwrap();
+            s.status = current;
+        }
+
+        if matches!(current, ServerState::Stopped | ServerState::Failed) {
+            break;
+        }
+
+        let interval = if current == ServerState::Running {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_secs(1)
+        };
+        std::thread::sleep(interval);
+    }
+}
+
+fn token_request_task(
+    engine: Arc<Mutex<LspEngine>>,
+    shared: Arc<Mutex<LspSharedState>>,
+    rx: std::sync::mpsc::Receiver<(std::path::PathBuf, String)>,
+) {
+    while let Ok((path, content)) = rx.recv() {
+        let tokens = {
+            let mut eng = engine.lock().unwrap();
+            eng.semantic_tokens(&path, &content).unwrap_or_default()
+        };
+        let mut s = shared.lock().unwrap();
+        s.semantic_tokens = tokens;
+    }
 }
 
 fn primary_language(path: &Path) -> Option<Language> {
@@ -77,66 +150,195 @@ fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
-    engine: &mut LspEngine,
+    engine: &Arc<Mutex<LspEngine>>,
+    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
 ) -> Result<()> {
+    let mut last_edit: Option<Instant> = None;
+    let mut initial_token_fetch_done = false;
+
     loop {
-        if let Some(lang) = primary_language(&state.opened_path) {
-            state.lsp_status = engine.server_state(lang);
+        let (lsp_status, semantic_tokens) = {
+            let s = state.lsp_state.lock().unwrap();
+            (s.status, s.semantic_tokens.clone())
+        };
+
+        adjust_scroll_offset(state, terminal.size()?.height);
+
+        if !initial_token_fetch_done && lsp_status == ServerState::Running {
+            initial_token_fetch_done = true;
+            if let Some(buf) = state.current_buffer() {
+                let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+            }
+        }
+
+        if let Some(last) = last_edit {
+            if last.elapsed() >= Duration::from_millis(300) {
+                last_edit = None;
+                if lsp_status == ServerState::Running {
+                    if let Some(buf) = state.current_buffer() {
+                        let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                    }
+                }
+            }
         }
 
         terminal.draw(|frame| {
-            let has_tree = state.file_tree.is_some();
-
-            let outer = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(1),
-                    Constraint::Length(3),
-                    Constraint::Length(1),
-                ])
-                .split(frame.area());
-
-            if has_tree {
-                let panes = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-                    .split(outer[0]);
-                tree_pane::render(frame, panes[0], state);
-                editor_pane::render(frame, panes[1], state);
-            } else {
-                editor_pane::render(frame, outer[0], state);
-            }
-
-            command_bar::render(frame, outer[1], state);
-            status_bar::render(frame, outer[2], state);
-
-            if state.show_exit_modal {
-                exit_modal::render(frame);
-            }
+            draw(frame, state, &lsp_status, &semantic_tokens);
         })?;
 
         if state.should_quit {
             return Ok(());
         }
 
-        if let Event::Key(key) = event::read()? {
-            if state.show_exit_modal {
-                handle_exit_modal(state, key.code, key.modifiers);
-            } else {
-                match state.mode {
-                    Mode::Chord => {
-                        handle_chord_mode(state, frontend, engine, key.code, key.modifiers)
-                    }
-                    Mode::Edit => handle_edit_mode(state, key.code, key.modifiers),
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                let buffer_modified = handle_key(
+                    state,
+                    frontend,
+                    engine,
+                    key.code,
+                    key.modifiers,
+                    token_tx,
+                    lsp_status,
+                );
+                if buffer_modified {
+                    last_edit = Some(Instant::now());
                 }
             }
         }
     }
 }
 
+fn adjust_scroll_offset(state: &mut EditorState, term_height: u16) {
+    let Some(buf) = state.current_buffer() else {
+        return;
+    };
+    let total = buf.line_count();
+    // Editor pane height = total - title (1) - status (1).
+    let visible = (term_height as usize).saturating_sub(2);
+    if visible == 0 {
+        state.scroll_offset = 0;
+        return;
+    }
+
+    if state.cursor_line < state.scroll_offset {
+        state.scroll_offset = state.cursor_line;
+    } else if state.cursor_line >= state.scroll_offset + visible {
+        state.scroll_offset = state.cursor_line + 1 - visible;
+    }
+    let max = total.saturating_sub(visible);
+    if state.scroll_offset > max {
+        state.scroll_offset = max;
+    }
+}
+
+fn draw(
+    frame: &mut ratatui::Frame,
+    state: &EditorState,
+    lsp_status: &ServerState,
+    semantic_tokens: &[SemanticToken],
+) {
+    let has_tree = state.file_tree.is_some() && state.focus_tree;
+
+    let h_constraints = if has_tree {
+        vec![Constraint::Percentage(25), Constraint::Percentage(75)]
+    } else {
+        vec![Constraint::Length(0), Constraint::Percentage(100)]
+    };
+
+    let h_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(h_constraints)
+        .split(frame.area());
+
+    let tree_area = h_layout[0];
+    let editor_area = h_layout[1];
+
+    if has_tree {
+        tree_pane::render(frame, tree_area, state);
+    }
+
+    let v_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(editor_area);
+
+    let title_area = v_layout[0];
+    let pane_area = v_layout[1];
+    let status_area = v_layout[2];
+
+    title_bar::render(frame, title_area, state);
+    editor_pane::render(frame, pane_area, state, *lsp_status, semantic_tokens);
+    status_bar::render(frame, status_area, state, *lsp_status);
+
+    if state.mode == Mode::Chord && !state.focus_tree {
+        chord_box::render(frame, pane_area, state);
+    }
+
+    if state.pending_open_path.is_some() {
+        exit_modal::render_open_modal(frame);
+    } else if state.show_exit_modal {
+        exit_modal::render(frame, state);
+    }
+}
+
+fn handle_key(
+    state: &mut EditorState,
+    frontend: &mut TuiFrontend,
+    engine: &Arc<Mutex<LspEngine>>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
+    lsp_status: ServerState,
+) -> bool {
+    // Priority 1: Exit modal
+    if state.show_exit_modal {
+        handle_exit_modal(state, code, modifiers);
+        return false;
+    }
+
+    // Priority 2: Open-confirm modal
+    if state.pending_open_path.is_some() {
+        handle_open_modal(state, code, modifiers, token_tx);
+        return false;
+    }
+
+    // Priority 3: Ctrl-T always handled
+    if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
+        toggle_tree(state);
+        return false;
+    }
+
+    // Priority 4: Tree focus
+    if state.focus_tree {
+        handle_tree_keys(state, code, modifiers);
+        return false;
+    }
+
+    // Priority 5: Chord mode
+    if state.mode == Mode::Chord {
+        return handle_chord_mode(
+            state, frontend, engine, code, modifiers, token_tx, lsp_status,
+        );
+    }
+
+    // Priority 6: Edit mode
+    handle_edit_mode(state, code, modifiers)
+}
+
 fn handle_exit_modal(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
     match code {
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.should_quit = true;
+        }
+        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                let _ = buf.write();
+            }
             state.should_quit = true;
         }
         KeyCode::Esc => {
@@ -146,89 +348,227 @@ fn handle_exit_modal(state: &mut EditorState, code: KeyCode, modifiers: KeyModif
     }
 }
 
-fn handle_chord_mode(
+fn handle_open_modal(
     state: &mut EditorState,
-    frontend: &mut TuiFrontend,
-    lsp: &mut LspEngine,
     code: KeyCode,
     modifiers: KeyModifiers,
+    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
 ) {
     match code {
-        KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.mode = Mode::Edit;
-            state.status_msg = "-- EDIT --".into();
-        }
-        KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-            toggle_tree(state);
-        }
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-            state.show_exit_modal = true;
-        }
-        KeyCode::Up => {
-            if state.focus_tree {
-                state.tree_selected = state.tree_selected.saturating_sub(1);
-            } else {
-                state.cursor_line = state.cursor_line.saturating_sub(1);
+        KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                let _ = buf.write();
             }
-        }
-        KeyCode::Down => {
-            if state.focus_tree {
-                if let Some(tree) = &state.file_tree {
-                    if state.tree_selected + 1 < tree.entries.len() {
-                        state.tree_selected += 1;
-                    }
-                }
-            } else if let Some(buf) = state.current_buffer() {
-                if state.cursor_line + 1 < buf.line_count() {
-                    state.cursor_line += 1;
+            if let Some(path) = state.pending_open_path.take() {
+                let _ = state.open_file(&path);
+                if let Some(buf) = state.current_buffer() {
+                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
                 }
             }
         }
-        KeyCode::Left if !state.focus_tree => {
-            state.cursor_col = state.cursor_col.saturating_sub(1);
-        }
-        KeyCode::Right if !state.focus_tree => {
-            state.cursor_col += 1;
-        }
-        KeyCode::Enter => {
-            if state.focus_tree {
-                if let Some(tree) = &state.file_tree {
-                    if let Some(entry) = tree.entries.get(state.tree_selected) {
-                        if !entry.is_dir {
-                            let path = entry.path.clone();
-                            let _ = state.open_file(&path);
-                        }
-                    }
+        KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(path) = state.pending_open_path.take() {
+                if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                    buf.dirty = false;
                 }
-            } else if !state.chord_input.is_empty() {
-                let input = state.chord_input.clone();
-                state.chord_input.clear();
-                execute_chord_input(state, frontend, lsp, &input);
+                let _ = state.open_file(&path);
+                if let Some(buf) = state.current_buffer() {
+                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                }
             }
-        }
-        KeyCode::Backspace => {
-            state.chord_input.pop();
         }
         KeyCode::Esc => {
-            state.chord_input.clear();
-            state.status_msg.clear();
-        }
-        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) && !state.focus_tree => {
-            state.chord_input.push(c);
+            state.pending_open_path = None;
         }
         _ => {}
     }
 }
 
-fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
+    match code {
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.show_exit_modal = true;
+        }
+        KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.focus_tree = false;
+            state.mode = Mode::Edit;
+            state.status_msg = "-- EDIT --".into();
+        }
+        KeyCode::Up => {
+            state.tree_selected = state.tree_selected.saturating_sub(1);
+        }
+        KeyCode::Down if !state.tree_view.is_empty() => {
+            let max = state.tree_view.len().saturating_sub(1);
+            if state.tree_selected < max {
+                state.tree_selected += 1;
+            }
+        }
+        KeyCode::Right => {
+            if let Some(entry) = state
+                .tree_view
+                .get(state.tree_selected)
+                .filter(|e| e.is_dir)
+            {
+                let _ = entry;
+                tree_pane::expand(state, state.tree_selected);
+            }
+        }
+        KeyCode::Left => {
+            if let Some(entry) = state
+                .tree_view
+                .get(state.tree_selected)
+                .filter(|e| e.is_dir)
+            {
+                let _ = entry;
+                tree_pane::collapse(state, state.tree_selected);
+            }
+        }
+        KeyCode::Enter => {
+            let selected = state.tree_selected;
+            if let Some(entry) = state.tree_view.get(selected).filter(|e| !e.is_dir) {
+                let path = entry.path.clone();
+                let is_dirty = state.current_buffer().is_some_and(|b| b.dirty);
+                if is_dirty {
+                    state.pending_open_path = Some(path);
+                } else {
+                    let _ = state.open_file(&path);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_chord_mode(
+    state: &mut EditorState,
+    frontend: &mut TuiFrontend,
+    engine: &Arc<Mutex<LspEngine>>,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
+    lsp_status: ServerState,
+) -> bool {
+    match code {
+        KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.mode = Mode::Edit;
+            state.status_msg = "-- EDIT --".into();
+        }
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            state.show_exit_modal = true;
+        }
+        KeyCode::Up => {
+            state.cursor_line = state.cursor_line.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            if let Some(buf) = state.current_buffer() {
+                if state.cursor_line + 1 < buf.line_count() {
+                    state.cursor_line += 1;
+                }
+            }
+        }
+        KeyCode::Left => {
+            state.chord_cursor_col = state.chord_cursor_col.saturating_sub(1);
+        }
+        KeyCode::Right if state.chord_cursor_col < state.chord_input.len() => {
+            state.chord_cursor_col += 1;
+        }
+        KeyCode::Enter if !state.chord_input.is_empty() => {
+            let input = state.chord_input.clone();
+            match ChordEngine::parse(&input) {
+                Ok(_) => {
+                    clear_chord(state);
+                    execute_chord_input(state, frontend, engine, &input, lsp_status);
+                    if lsp_status == ServerState::Running {
+                        if let Some(buf) = state.current_buffer() {
+                            let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                        }
+                    }
+                }
+                Err(_) => {
+                    state.chord_error = true;
+                    state.status_msg = "invalid chord".into();
+                }
+            }
+        }
+        KeyCode::Backspace if state.chord_cursor_col > 0 && !state.chord_input.is_empty() => {
+            let col = state.chord_cursor_col.min(state.chord_input.len());
+            state.chord_input.remove(col - 1);
+            state.chord_cursor_col = col - 1;
+            state.chord_error = false;
+            try_auto_submit(state, frontend, engine, token_tx, lsp_status);
+        }
+        KeyCode::Esc => {
+            clear_chord(state);
+            state.status_msg.clear();
+        }
+        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            let col = state.chord_cursor_col.min(state.chord_input.len());
+            state.chord_input.insert(col, c);
+            state.chord_cursor_col = col + 1;
+            state.chord_error = false;
+            try_auto_submit(state, frontend, engine, token_tx, lsp_status);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn try_auto_submit(
+    state: &mut EditorState,
+    frontend: &mut TuiFrontend,
+    engine: &Arc<Mutex<LspEngine>>,
+    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
+    lsp_status: ServerState,
+) {
+    let input = &state.chord_input;
+
+    if input.len() == 4 && input.chars().next().is_some_and(|c| c.is_lowercase()) {
+        if let Some(_query) =
+            ChordEngine::try_auto_submit_short(input, state.cursor_line, state.cursor_col)
+        {
+            let input_clone = state.chord_input.clone();
+            state.chord_running = true;
+            clear_chord(state);
+            execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+            state.chord_running = false;
+            if lsp_status == ServerState::Running {
+                if let Some(buf) = state.current_buffer() {
+                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                }
+            }
+        }
+    } else if input.ends_with(')')
+        && input.chars().next().is_some_and(|c| c.is_uppercase())
+        && parens_balanced(input)
+        && ChordEngine::parse(input).is_ok()
+    {
+        let input_clone = state.chord_input.clone();
+        state.chord_running = true;
+        clear_chord(state);
+        execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+        state.chord_running = false;
+        if lsp_status == ServerState::Running {
+            if let Some(buf) = state.current_buffer() {
+                let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+            }
+        }
+    }
+}
+
+fn clear_chord(state: &mut EditorState) {
+    state.chord_input.clear();
+    state.chord_cursor_col = 0;
+    state.chord_error = false;
+    state.chord_running = false;
+}
+
+fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    let mut modified = false;
     match code {
         KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.mode = Mode::Chord;
             state.status_msg.clear();
-            state.chord_input.clear();
-        }
-        KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
-            toggle_tree(state);
+            clear_chord(state);
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
@@ -248,6 +588,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     buf.lines[line].insert(col, '\t');
                     buf.dirty = true;
                     state.cursor_col = col + 1;
+                    modified = true;
                 }
             }
         }
@@ -265,7 +606,16 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             state.cursor_col = state.cursor_col.saturating_sub(1);
         }
         KeyCode::Right => {
-            state.cursor_col += 1;
+            if let Some(buf) = state.current_buffer() {
+                let max = buf
+                    .lines
+                    .get(state.cursor_line)
+                    .map(|l| l.len())
+                    .unwrap_or(0);
+                if state.cursor_col < max {
+                    state.cursor_col += 1;
+                }
+            }
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
             let line = state.cursor_line;
@@ -276,6 +626,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     buf.lines[line].insert(col, c);
                     buf.dirty = true;
                     state.cursor_col = col + 1;
+                    modified = true;
                 }
             }
         }
@@ -287,6 +638,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     buf.lines[line].remove(col - 1);
                     buf.dirty = true;
                     state.cursor_col -= 1;
+                    modified = true;
                 } else if col == 0 && line > 0 {
                     let current_line = buf.lines.remove(line);
                     buf.dirty = true;
@@ -295,6 +647,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     buf.lines[prev_line].push_str(&current_line);
                     state.cursor_line = prev_line;
                     state.cursor_col = prev_len;
+                    modified = true;
                 }
             }
         }
@@ -310,16 +663,30 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     buf.insert_line(line + 1, remainder);
                     state.cursor_line += 1;
                     state.cursor_col = 0;
+                    modified = true;
                 }
             }
         }
         _ => {}
     }
+    modified
 }
 
 fn toggle_tree(state: &mut EditorState) {
     if state.file_tree.is_some() {
-        state.focus_tree = !state.focus_tree;
+        if state.focus_tree {
+            state.focus_tree = false;
+            state.mode = state.pre_tree_mode;
+        } else {
+            state.pre_tree_mode = state.mode;
+            state.focus_tree = true;
+            if let Some(buf) = state.current_buffer() {
+                let buf_path = buf.path.clone();
+                if let Some(idx) = state.tree_view.iter().position(|e| e.path == buf_path) {
+                    state.tree_selected = idx;
+                }
+            }
+        }
     } else {
         let dir = if state.opened_path.is_dir() {
             state.opened_path.clone()
@@ -330,10 +697,29 @@ fn toggle_tree(state: &mut EditorState) {
                 .unwrap_or(Path::new("."))
                 .to_path_buf()
         };
-        if let Ok(tree) = crate::data::file_tree::FileTree::from_dir(&dir) {
-            state.file_tree = Some(tree);
-            state.focus_tree = true;
-            state.status_msg = "file tree opened".into();
+        match crate::data::file_tree::FileTree::from_dir(&dir) {
+            Ok(tree) => {
+                let tree_view: Vec<_> = tree
+                    .entries
+                    .iter()
+                    .filter(|e| e.depth == 0)
+                    .cloned()
+                    .collect();
+                state.file_tree = Some(tree);
+                state.tree_view = tree_view;
+                state.pre_tree_mode = state.mode;
+                state.focus_tree = true;
+                if let Some(buf) = state.current_buffer() {
+                    let buf_path = buf.path.clone();
+                    if let Some(idx) = state.tree_view.iter().position(|e| e.path == buf_path) {
+                        state.tree_selected = idx;
+                    }
+                }
+                state.status_msg = "file tree opened".into();
+            }
+            Err(e) => {
+                state.status_msg = format!("tree error: {e}");
+            }
         }
     }
 }
@@ -341,23 +727,24 @@ fn toggle_tree(state: &mut EditorState) {
 fn execute_chord_input(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
-    lsp: &mut LspEngine,
+    engine: &Arc<Mutex<LspEngine>>,
     input: &str,
+    lsp_status: ServerState,
 ) {
     match ChordEngine::parse(input) {
         Ok(mut query) => {
-            if query.requires_lsp && !state.lsp_status.is_available() {
-                if state.lsp_status.is_pending() {
+            if query.requires_lsp && !lsp_status.is_available() {
+                if lsp_status.is_pending() {
                     state.status_msg = format!(
                         "chord {} waiting for LSP ({})",
                         query.short_form(),
-                        state.lsp_status.display()
+                        lsp_status.display()
                     );
                 } else {
                     state.status_msg = format!(
                         "chord {} requires LSP but {}",
                         query.short_form(),
-                        state.lsp_status.display()
+                        lsp_status.display()
                     );
                 }
                 return;
@@ -371,7 +758,12 @@ fn execute_chord_input(
                 buffers.insert(path_str, buf.clone());
             }
 
-            match ChordEngine::resolve(&query, &buffers, lsp) {
+            let resolve_result = {
+                let mut eng = engine.lock().unwrap();
+                ChordEngine::resolve(&query, &buffers, &mut eng)
+            };
+
+            match resolve_result {
                 Ok(resolved) => match ChordEngine::patch(&resolved, &buffers) {
                     Ok(actions) => {
                         for action in actions.values() {

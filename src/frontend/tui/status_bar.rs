@@ -9,8 +9,8 @@ use ratatui::{
 use crate::data::lsp::types::ServerState;
 use crate::data::state::EditorState;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
-    let lsp_color = match state.lsp_status {
+pub fn render(frame: &mut Frame, area: Rect, state: &EditorState, lsp_status: ServerState) {
+    let lsp_color = match lsp_status {
         ServerState::Running => Color::Green,
         ServerState::Failed | ServerState::Missing => Color::Red,
         ServerState::Installing | ServerState::Starting | ServerState::Available => Color::Yellow,
@@ -18,7 +18,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
     };
 
     let lsp_span = Span::styled(
-        format!(" {} ", state.lsp_status.display()),
+        format!(" {} ", lsp_status.display()),
         Style::default().fg(lsp_color),
     );
 
@@ -55,7 +55,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
         Style::default().fg(Color::DarkGray),
     );
 
-    let line = Line::from(vec![mode_span, file_span, pos_span, lsp_span]);
+    let msg_span = if state.status_msg.is_empty() {
+        Span::raw("")
+    } else {
+        Span::styled(
+            format!(" {} ", state.status_msg),
+            Style::default().fg(Color::Yellow),
+        )
+    };
+
+    let line = Line::from(vec![mode_span, file_span, pos_span, msg_span, lsp_span]);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
 }

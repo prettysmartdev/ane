@@ -1163,6 +1163,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sym_sel(
         name: &str,
         kind: SymbolKind,

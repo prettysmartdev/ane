@@ -330,6 +330,7 @@ fn run_with_lsp(
     actions.remove(path).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fn_sym(
     name: &str,
     sl: usize,

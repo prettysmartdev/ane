@@ -170,6 +170,28 @@ pub enum DiagnosticSeverity {
 }
 
 #[derive(Debug, Clone)]
+pub struct SemanticToken {
+    pub line: usize,
+    pub start_col: usize,
+    pub length: usize,
+    pub token_type: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LspSharedState {
+    pub status: ServerState,
+    pub semantic_tokens: Vec<SemanticToken>,
+}
+
+impl Default for LspSharedState {
+    fn default() -> Self {
+        Self {
+            status: ServerState::Undetected,
+            semantic_tokens: Vec::new(),
+        }
+    }
+}
+
 pub struct LspServerInfo {
     pub language: Language,
     pub server_name: &'static str,

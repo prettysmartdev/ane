@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::data::lsp::registry;
 use crate::data::lsp::types::{
     CompletionItem, DocumentSymbol, HoverInfo, Language, Location, LspEvent, LspServerInfo,
-    ServerState, SymbolKind, SymbolRange,
+    SemanticToken, ServerState, SymbolKind, SymbolRange,
 };
 
 use super::detector;
@@ -458,6 +458,20 @@ impl LspEngine {
         });
         let result = self.send_request(lang, "textDocument/definition", params)?;
         Ok(parse_location(&result))
+    }
+
+    pub fn semantic_tokens(
+        &mut self,
+        file_path: &Path,
+        content: &str,
+    ) -> Result<Vec<SemanticToken>> {
+        let lang = self.language_for_file(file_path)?;
+        self.ensure_open(lang, file_path)?;
+        let _ = self.notify_document_change(file_path, content, 2);
+        let uri = path_to_uri(file_path);
+        let params = json!({ "textDocument": { "uri": uri } });
+        let result = self.send_request(lang, "textDocument/semanticTokens/full", params)?;
+        parse_semantic_tokens(&result)
     }
 
     // --- Internal Methods ---
@@ -1078,6 +1092,80 @@ fn parse_hover(value: &Value) -> Option<HoverInfo> {
     };
 
     Some(HoverInfo { contents: text })
+}
+
+const STANDARD_TOKEN_TYPES: &[&str] = &[
+    "namespace",
+    "type",
+    "class",
+    "enum",
+    "interface",
+    "struct",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "enumMember",
+    "event",
+    "function",
+    "method",
+    "macro",
+    "keyword",
+    "modifier",
+    "comment",
+    "string",
+    "number",
+    "regexp",
+    "operator",
+    "decorator",
+];
+
+fn parse_semantic_tokens(value: &Value) -> Result<Vec<SemanticToken>> {
+    let data = match value.get("data").and_then(|d| d.as_array()) {
+        Some(arr) => arr,
+        None => return Ok(Vec::new()),
+    };
+
+    let nums: Vec<usize> = data
+        .iter()
+        .filter_map(|v| v.as_u64().map(|n| n as usize))
+        .collect();
+
+    if nums.len() % 5 != 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut tokens = Vec::new();
+    let mut current_line: usize = 0;
+    let mut current_col: usize = 0;
+
+    for chunk in nums.chunks(5) {
+        let delta_line = chunk[0];
+        let delta_start = chunk[1];
+        let length = chunk[2];
+        let token_type_idx = chunk[3];
+
+        if delta_line > 0 {
+            current_line += delta_line;
+            current_col = delta_start;
+        } else {
+            current_col += delta_start;
+        }
+
+        let token_type = STANDARD_TOKEN_TYPES
+            .get(token_type_idx)
+            .unwrap_or(&"unknown")
+            .to_string();
+
+        tokens.push(SemanticToken {
+            line: current_line,
+            start_col: current_col,
+            length,
+            token_type,
+        });
+    }
+
+    Ok(tokens)
 }
 
 fn parse_location(value: &Value) -> Option<Location> {

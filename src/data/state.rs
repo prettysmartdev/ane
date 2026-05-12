@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
 use super::buffer::Buffer;
-use super::file_tree::FileTree;
-use super::lsp::types::ServerState;
+use super::file_tree::{FileEntry, FileTree};
+use super::lsp::types::LspSharedState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -27,8 +28,14 @@ pub struct EditorState {
     pub focus_tree: bool,
     pub chord_input: String,
     pub show_exit_modal: bool,
-    pub lsp_status: ServerState,
     pub opened_path: PathBuf,
+    pub chord_cursor_col: usize,
+    pub chord_error: bool,
+    pub chord_running: bool,
+    pub pre_tree_mode: Mode,
+    pub pending_open_path: Option<PathBuf>,
+    pub tree_view: Vec<FileEntry>,
+    pub lsp_state: Arc<Mutex<LspSharedState>>,
 }
 
 impl EditorState {
@@ -52,13 +59,25 @@ impl EditorState {
             focus_tree: false,
             chord_input: String::new(),
             show_exit_modal: false,
-            lsp_status: ServerState::Undetected,
             opened_path: path.to_path_buf(),
+            chord_cursor_col: 0,
+            chord_error: false,
+            chord_running: false,
+            pre_tree_mode: Mode::Chord,
+            pending_open_path: None,
+            tree_view: Vec::new(),
+            lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
         })
     }
 
     pub fn for_directory(path: &Path) -> Result<Self> {
         let tree = FileTree::from_dir(path)?;
+        let tree_view: Vec<FileEntry> = tree
+            .entries
+            .iter()
+            .filter(|e| e.depth == 0)
+            .cloned()
+            .collect();
         Ok(Self {
             buffers: Vec::new(),
             active_buffer: 0,
@@ -73,8 +92,14 @@ impl EditorState {
             focus_tree: true,
             chord_input: String::new(),
             show_exit_modal: false,
-            lsp_status: ServerState::Undetected,
             opened_path: path.to_path_buf(),
+            chord_cursor_col: 0,
+            chord_error: false,
+            chord_running: false,
+            pre_tree_mode: Mode::Chord,
+            pending_open_path: None,
+            tree_view,
+            lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
         })
     }
 
@@ -106,5 +131,69 @@ impl EditorState {
             .iter()
             .map(|b| (b.path.clone(), b.content()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn for_file_initializes_no_tree_and_empty_tree_view() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let state = EditorState::for_file(&path).unwrap();
+
+        assert!(state.file_tree.is_none());
+        assert!(state.tree_view.is_empty());
+    }
+
+    #[test]
+    fn for_file_chord_fields_initialized_to_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "fn main() {}").unwrap();
+
+        let state = EditorState::for_file(&path).unwrap();
+
+        assert_eq!(state.chord_cursor_col, 0);
+        assert!(!state.chord_error);
+        assert!(!state.chord_running);
+    }
+
+    #[test]
+    fn for_directory_tree_view_contains_only_depth_zero_entries() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join("subdir")).unwrap();
+        fs::write(tmp.path().join("file.rs"), "").unwrap();
+        fs::write(tmp.path().join("subdir/nested.rs"), "").unwrap();
+
+        let state = EditorState::for_directory(tmp.path()).unwrap();
+
+        assert!(!state.tree_view.is_empty());
+        for entry in &state.tree_view {
+            assert_eq!(entry.depth, 0, "unexpected depth for {:?}", entry.path);
+        }
+        let tree = state.file_tree.as_ref().unwrap();
+        assert!(
+            tree.entries.iter().any(|e| e.depth > 0),
+            "full tree should have nested entries"
+        );
+    }
+
+    #[test]
+    fn for_directory_chord_fields_initialized_to_defaults() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("x.rs"), "").unwrap();
+
+        let state = EditorState::for_directory(tmp.path()).unwrap();
+
+        assert_eq!(state.chord_cursor_col, 0);
+        assert!(!state.chord_error);
+        assert!(!state.chord_running);
     }
 }
