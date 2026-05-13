@@ -12,6 +12,19 @@ use super::chord_engine::types::{ChordArgs, ChordQuery};
 use super::chord_engine::ChordEngine;
 use super::lsp_engine::LspEngine;
 
+pub trait FrontendCapabilities {
+    fn is_interactive(&self) -> bool;
+}
+
+#[cfg(test)]
+struct HeadlessContext;
+#[cfg(test)]
+impl FrontendCapabilities for HeadlessContext {
+    fn is_interactive(&self) -> bool {
+        false
+    }
+}
+
 pub fn parse_chord(input: &str) -> Result<ChordQuery> {
     ChordEngine::parse(input)
 }
@@ -34,7 +47,16 @@ pub struct ChordResult {
     pub yanked: Option<String>,
 }
 
-pub fn execute_chord(path: &Path, chord: &ChordQuery, lsp: &mut LspEngine) -> Result<ChordResult> {
+pub fn execute_chord(
+    frontend: &dyn FrontendCapabilities,
+    path: &Path,
+    chord: &ChordQuery,
+    lsp: &mut LspEngine,
+) -> Result<ChordResult> {
+    if chord.action.requires_interactive() && !frontend.is_interactive() {
+        bail!("Jump action requires an interactive frontend; use ane in TUI mode");
+    }
+
     if !path.exists() {
         bail!("file not found: {}", path.display());
     }
@@ -236,6 +258,7 @@ mod tests {
     fn error_message_file_not_found_exact_format() {
         let chord = parse_chord("cels").unwrap();
         let result = execute_chord(
+            &HeadlessContext,
             Path::new("/nonexistent/path/does-not-exist.rs"),
             &chord,
             &mut default_engine(),
@@ -258,7 +281,7 @@ mod tests {
 
         let chord = parse_chord("cifc").unwrap(); // ChangeInsideFunctionContents, requires_lsp=true
                                                   // No target_name or cursor_pos set → error before LSP starts
-        let result = execute_chord(f_rs.path(), &chord, &mut default_engine());
+        let result = execute_chord(&HeadlessContext, f_rs.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -272,7 +295,7 @@ mod tests {
         // Non-LSP scope without args must also be rejected.
         let f = temp_file("hello\n");
         let chord = parse_chord("cels").unwrap();
-        let result = execute_chord(f.path(), &chord, &mut default_engine());
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -292,7 +315,7 @@ mod tests {
         let mut chord = parse_chord("cifc").unwrap();
         chord.args.target_name = Some("some_fn".to_string());
 
-        let result = execute_chord(f.path(), &chord, &mut default_engine());
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("no language server available"), "got: {msg}");
@@ -388,7 +411,8 @@ mod tests {
         let mut chord = parse_chord("cels").unwrap();
         chord.args.target_line = Some(1);
         chord.args.value = Some("xxx".to_string());
-        let result = execute_chord(f.path(), &chord, &mut default_engine()).unwrap();
+        let result =
+            execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine()).unwrap();
         assert!(result.modified.contains("xxx"));
         assert!(!result.modified.contains("bbb"));
     }
@@ -398,7 +422,8 @@ mod tests {
         let f = temp_file("aaa\nbbb\nccc");
         let mut chord = parse_chord("dels").unwrap();
         chord.args.target_line = Some(1);
-        let result = execute_chord(f.path(), &chord, &mut default_engine()).unwrap();
+        let result =
+            execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine()).unwrap();
         assert!(!result.modified.contains("bbb"));
         assert!(result.modified.contains("aaa"));
         assert!(result.modified.contains("ccc"));
@@ -418,5 +443,30 @@ mod tests {
         assert_eq!(parsed.scope, Scope::Buffer);
         assert_eq!(parsed.component, Component::Self_);
         assert!(!parsed.requires_lsp);
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    #[test]
+    fn execute_chord_jump_rejects_before_file_io_check() {
+        // Jump on a non-interactive frontend must fail with the interactive error
+        // BEFORE the file-not-found check fires — even for a nonexistent path.
+        let chord = parse_chord("jefc").unwrap();
+        let result = execute_chord(
+            &HeadlessContext,
+            Path::new("/nonexistent/path/does-not-exist.rs"),
+            &chord,
+            &mut default_engine(),
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("interactive") || msg.contains("Jump"),
+            "expected interactive error before file-not-found, got: {msg}"
+        );
+        assert!(
+            !msg.contains("file not found"),
+            "file-not-found must not fire before interactive check, got: {msg}"
+        );
     }
 }

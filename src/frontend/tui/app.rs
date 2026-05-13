@@ -862,3 +862,60 @@ fn execute_chord_input(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use crate::data::state::EditorState;
+
+    fn make_state_with_lines(lines: &[&str]) -> (tempfile::NamedTempFile, EditorState) {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                f.write_all(b"\n").unwrap();
+            }
+            f.write_all(line.as_bytes()).unwrap();
+        }
+        f.flush().unwrap();
+        let state = EditorState::for_file(f.path()).unwrap();
+        (f, state)
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    #[test]
+    fn adjust_scroll_offset_scrolls_down_when_cursor_below_viewport() {
+        // Chord mode, no tree: chord_box_rows=4, visible=20-2-4=14
+        // cursor_line=15 >= scroll_offset(0)+14 → scroll_offset = 15+1-14 = 2
+        let lines: Vec<&str> = (0..30).map(|_| "line").collect();
+        let (_f, mut state) = make_state_with_lines(&lines);
+        state.scroll_offset = 0;
+        state.cursor_line = 15;
+        adjust_scroll_offset(&mut state, 20);
+        assert_eq!(state.scroll_offset, 2);
+    }
+
+    #[test]
+    fn adjust_scroll_offset_scrolls_up_when_cursor_above_scroll() {
+        // cursor_line=3 < scroll_offset=10 → scroll_offset = 3
+        let lines: Vec<&str> = (0..30).map(|_| "line").collect();
+        let (_f, mut state) = make_state_with_lines(&lines);
+        state.scroll_offset = 10;
+        state.cursor_line = 3;
+        adjust_scroll_offset(&mut state, 20);
+        assert_eq!(state.scroll_offset, 3);
+    }
+
+    #[test]
+    fn adjust_scroll_offset_no_change_when_cursor_in_viewport() {
+        // cursor_line=5, scroll_offset=0, visible=14 → 5 in [0,14) → no change
+        let lines: Vec<&str> = (0..30).map(|_| "line").collect();
+        let (_f, mut state) = make_state_with_lines(&lines);
+        state.scroll_offset = 0;
+        state.cursor_line = 5;
+        adjust_scroll_offset(&mut state, 20);
+        assert_eq!(state.scroll_offset, 0);
+    }
+}
