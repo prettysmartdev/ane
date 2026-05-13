@@ -279,6 +279,7 @@ fn multi_buffer_same_chord_applied_to_each() {
 fn cli_execute_chord_modifies_file_on_disk() {
     use ane::commands::chord::execute_chord;
     use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
+    use ane::frontend::cli_frontend::CliFrontend;
 
     let mut f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     write!(f, "line one\nline two\nline three").unwrap();
@@ -289,7 +290,7 @@ fn cli_execute_chord_modifies_file_on_disk() {
     chord.args.value = Some("CHANGED".to_string());
 
     let mut lsp = LspEngine::new(LspEngineConfig::default());
-    let result = execute_chord(f.path(), &chord, &mut lsp).unwrap();
+    let result = execute_chord(&CliFrontend, f.path(), &chord, &mut lsp).unwrap();
     assert!(result.modified.contains("CHANGED"));
     assert!(!result.modified.contains("line two"));
 
@@ -302,6 +303,7 @@ fn cli_execute_chord_modifies_file_on_disk() {
 fn cli_execute_chord_yank_does_not_modify_file() {
     use ane::commands::chord::execute_chord;
     use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
+    use ane::frontend::cli_frontend::CliFrontend;
 
     let content = "original content\nsecond line";
     let mut f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
@@ -312,7 +314,7 @@ fn cli_execute_chord_yank_does_not_modify_file() {
     chord.args.target_line = Some(0);
 
     let mut lsp = LspEngine::new(LspEngineConfig::default());
-    let result = execute_chord(f.path(), &chord, &mut lsp).unwrap();
+    let result = execute_chord(&CliFrontend, f.path(), &chord, &mut lsp).unwrap();
     assert_eq!(result.original, result.modified);
 
     let on_disk = std::fs::read_to_string(f.path()).unwrap();

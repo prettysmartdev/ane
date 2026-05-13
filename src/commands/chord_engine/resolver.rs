@@ -40,8 +40,16 @@ fn resolve_buffer(
 ) -> Result<BufferResolution> {
     let scope_range = resolve_scope(query, buffer_name, buffer, lsp)?;
     let component_range = resolve_component(query, buffer, &scope_range, buffer_name, lsp)?;
-    let target_ranges =
+    let mut target_ranges =
         apply_positional(query, buffer, &scope_range, &component_range, buffer_name)?;
+
+    if query.action == Action::Jump && query.positional == Positional::Outside {
+        target_ranges = match query.component {
+            Component::Beginning => vec![position_before_scope(buffer, &scope_range)],
+            Component::End => vec![position_after_scope(buffer, &scope_range)],
+            _ => target_ranges,
+        };
+    }
 
     let replacement = query.args.value.clone();
     let primary = target_ranges.first().copied().unwrap_or(TextRange::point(
@@ -85,6 +93,7 @@ fn resolve_scope(
             &[SymbolKind::Struct, SymbolKind::Enum],
         ),
         Scope::Member => resolve_member_scope(query, buffer_name, buffer, lsp),
+        Scope::Delimiter => resolve_delimiter_scope(query, buffer, buffer_name),
     }
 }
 
@@ -454,6 +463,15 @@ fn resolve_name_component(
         ));
     }
 
+    if query.scope == Scope::Delimiter {
+        return Ok(TextRange {
+            start_line: scope_range.start_line,
+            start_col: scope_range.start_col,
+            end_line: scope_range.start_line,
+            end_col: scope_range.start_col + 1,
+        });
+    }
+
     let path = Path::new(buffer_name);
     let symbols = lsp.document_symbols(path).map_err(|e| {
         ChordError::resolve(
@@ -512,7 +530,7 @@ fn scope_to_symbol_kinds(scope: Scope) -> Vec<SymbolKind> {
         Scope::Function => vec![SymbolKind::Function, SymbolKind::Method],
         Scope::Variable => vec![SymbolKind::Variable, SymbolKind::Const],
         Scope::Struct => vec![SymbolKind::Struct, SymbolKind::Enum],
-        _ => vec![],
+        Scope::Member | Scope::Line | Scope::Buffer | Scope::Delimiter => vec![],
     }
 }
 
@@ -740,6 +758,17 @@ fn apply_positional(
                 end_col: component_range.start_col,
             }])
         }
+        Positional::To => {
+            let cursor = query.args.cursor_pos.ok_or_else(|| {
+                ChordError::resolve(buffer_name, "'To' positional requires a cursor position")
+            })?;
+            Ok(vec![TextRange {
+                start_line: cursor.0,
+                start_col: cursor.1,
+                end_line: component_range.end_line,
+                end_col: component_range.end_col,
+            }])
+        }
         Positional::Outside => Ok(outside_ranges(scope_range, component_range)),
         Positional::Next | Positional::Previous => {
             // For Line scope the component range was computed at the cursor's
@@ -763,6 +792,31 @@ fn apply_positional(
             Ok(vec![*component_range])
         }
     }
+}
+
+/// Position just before the scope: end of the previous line, or (0, 0) if the
+/// scope already starts at the top of the buffer. Used by Jump+Outside+Beginning.
+fn position_before_scope(buffer: &Buffer, scope: &TextRange) -> TextRange {
+    if scope.start_line == 0 {
+        return TextRange::point(0, 0);
+    }
+    let prev = scope.start_line - 1;
+    let col = buffer
+        .lines
+        .get(prev)
+        .map(|l| line_char_count(l))
+        .unwrap_or(0);
+    TextRange::point(prev, col)
+}
+
+/// Position just after the scope: start of the next line, or end-of-scope if
+/// the scope already ends on the buffer's last line. Used by Jump+Outside+End.
+fn position_after_scope(buffer: &Buffer, scope: &TextRange) -> TextRange {
+    let last = buffer.line_count().saturating_sub(1);
+    if scope.end_line >= last {
+        return TextRange::point(scope.end_line, scope.end_col);
+    }
+    TextRange::point(scope.end_line + 1, 0)
 }
 
 fn outside_ranges(scope: &TextRange, component: &TextRange) -> Vec<TextRange> {
@@ -833,6 +887,13 @@ fn resolve_cursor_and_mode(
             (Some(cursor), Some(EditorMode::Chord))
         }
         Action::Yank => (None, None),
+        Action::Jump => {
+            let cursor = CursorPosition {
+                line: target_range.start_line,
+                col: target_range.start_col,
+            };
+            (Some(cursor), Some(EditorMode::Edit))
+        }
     }
 }
 
@@ -846,6 +907,22 @@ fn resolve_contents_component(
 ) -> Result<TextRange> {
     match query.scope {
         Scope::Function | Scope::Struct => find_brace_range(buffer, scope_range, buffer_name),
+        Scope::Delimiter => {
+            // TextRange end_col is exclusive: scope_range.end_col points one
+            // past the closing delimiter, so end_col - 1 is the position of
+            // the closing delimiter and thus the exclusive end of "contents".
+            let end_col = if scope_range.end_col > 0 {
+                scope_range.end_col - 1
+            } else {
+                0
+            };
+            Ok(TextRange {
+                start_line: scope_range.start_line,
+                start_col: scope_range.start_col + 1,
+                end_line: scope_range.end_line,
+                end_col,
+            })
+        }
         _ => Err(ChordError::resolve(
             buffer_name,
             format!("Contents component is not valid for {} scope", query.scope),
@@ -1304,6 +1381,237 @@ fn find_member_value(
     Err(ChordError::resolve(buffer_name, "member has no value").into())
 }
 
+fn resolve_delimiter_scope(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    let (line, col) = query.args.cursor_pos.ok_or_else(|| {
+        ChordError::resolve(buffer_name, "Delimiter scope requires a cursor position")
+    })?;
+    find_innermost_delimiter(buffer, line, col, buffer_name)
+}
+
+fn find_innermost_delimiter(
+    buffer: &Buffer,
+    cursor_line: usize,
+    cursor_col: usize,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    let paired = [('(', ')'), ('{', '}'), ('[', ']')];
+    let self_paired = ['"', '\'', '`'];
+
+    let mut candidates: Vec<TextRange> = Vec::new();
+
+    for &(open, close) in &paired {
+        if let Some(range) = find_paired_delimiter(buffer, cursor_line, cursor_col, open, close) {
+            candidates.push(range);
+        }
+    }
+
+    for &delim in &self_paired {
+        if let Some(range) = find_self_paired_delimiter(buffer, cursor_line, cursor_col, delim) {
+            candidates.push(range);
+        }
+    }
+
+    candidates
+        .into_iter()
+        .min_by_key(delimiter_span_size)
+        .ok_or_else(|| {
+            ChordError::resolve(
+                buffer_name,
+                "no enclosing delimiter found at cursor position",
+            )
+            .into()
+        })
+}
+
+fn delimiter_span_size(range: &TextRange) -> (usize, usize) {
+    if range.start_line == range.end_line {
+        (0, range.end_col - range.start_col)
+    } else {
+        (range.end_line - range.start_line, range.end_col)
+    }
+}
+
+fn find_paired_delimiter(
+    buffer: &Buffer,
+    cursor_line: usize,
+    cursor_col: usize,
+    open: char,
+    close: char,
+) -> Option<TextRange> {
+    let mut best: Option<TextRange> = None;
+
+    let mut depth: i32 = 0;
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+
+    let lines = &buffer.lines;
+
+    for line_idx in (0..=cursor_line.min(lines.len().saturating_sub(1))).rev() {
+        let line_chars: Vec<char> = lines[line_idx].chars().collect();
+        let start_col = if line_idx == cursor_line {
+            cursor_col.min(line_chars.len())
+        } else {
+            line_chars.len()
+        };
+
+        for col in (0..start_col).rev() {
+            let ch = line_chars[col];
+            if ch == close {
+                depth += 1;
+            } else if ch == open {
+                if depth > 0 {
+                    depth -= 1;
+                } else {
+                    candidates.push((line_idx, col));
+                }
+            }
+        }
+    }
+
+    for (open_line, open_col) in candidates {
+        let mut d: i32 = 0;
+        let mut found = false;
+        'outer: for (line_idx, line) in lines.iter().enumerate().skip(open_line) {
+            let line_chars: Vec<char> = line.chars().collect();
+            let from = if line_idx == open_line { open_col } else { 0 };
+            for (col, &ch) in line_chars.iter().enumerate().skip(from) {
+                if ch == open {
+                    d += 1;
+                } else if ch == close {
+                    d -= 1;
+                    if d == 0 {
+                        let encloses = (line_idx > cursor_line)
+                            || (line_idx == cursor_line && col >= cursor_col);
+                        if encloses {
+                            let range = TextRange {
+                                start_line: open_line,
+                                start_col: open_col,
+                                end_line: line_idx,
+                                end_col: col + 1,
+                            };
+                            if best.as_ref().map_or(true, |b| {
+                                delimiter_span_size(&range) < delimiter_span_size(b)
+                            }) {
+                                best = Some(range);
+                            }
+                        }
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        if !found {
+            continue;
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+
+    best
+}
+
+/// A character at `col` is escaped iff the number of consecutive backslashes
+/// immediately preceding it is odd. (Two `\\` consume each other.)
+fn is_escaped_at(line_chars: &[char], col: usize) -> bool {
+    let mut count = 0usize;
+    let mut i = col;
+    while i > 0 && line_chars[i - 1] == '\\' {
+        count += 1;
+        i -= 1;
+    }
+    count % 2 == 1
+}
+
+fn find_self_paired_delimiter(
+    buffer: &Buffer,
+    cursor_line: usize,
+    cursor_col: usize,
+    delim: char,
+) -> Option<TextRange> {
+    let lines = &buffer.lines;
+
+    let mut count = 0usize;
+
+    for (line_idx, line) in lines
+        .iter()
+        .enumerate()
+        .take(cursor_line.min(lines.len().saturating_sub(1)) + 1)
+    {
+        let line_chars: Vec<char> = line.chars().collect();
+        let end = if line_idx == cursor_line {
+            cursor_col.min(line_chars.len())
+        } else {
+            line_chars.len()
+        };
+        let mut last_was_backslash = false;
+        for &ch in line_chars.iter().take(end) {
+            if ch == delim && !last_was_backslash {
+                count += 1;
+            }
+            last_was_backslash = ch == '\\' && !last_was_backslash;
+        }
+    }
+
+    if count % 2 == 0 {
+        return None;
+    }
+
+    let mut open_pos: Option<(usize, usize)> = None;
+    'backward: for line_idx in (0..=cursor_line.min(lines.len().saturating_sub(1))).rev() {
+        let line_chars: Vec<char> = lines[line_idx].chars().collect();
+        let start = if line_idx == cursor_line {
+            cursor_col.min(line_chars.len())
+        } else {
+            line_chars.len()
+        };
+        for col in (0..start).rev() {
+            let ch = line_chars[col];
+            if ch == delim && !is_escaped_at(&line_chars, col) {
+                open_pos = Some((line_idx, col));
+                break 'backward;
+            }
+        }
+    }
+
+    let (open_line, open_col) = open_pos?;
+
+    let mut close_pos: Option<(usize, usize)> = None;
+    'forward: for (line_idx, line) in lines.iter().enumerate().skip(cursor_line) {
+        let line_chars: Vec<char> = line.chars().collect();
+        let from = if line_idx == cursor_line {
+            cursor_col.min(line_chars.len())
+        } else {
+            0
+        };
+        let mut prev_backslash = if from > 0 {
+            line_chars[from - 1] == '\\'
+        } else {
+            false
+        };
+        for (col, &ch) in line_chars.iter().enumerate().skip(from) {
+            if ch == delim && !prev_backslash {
+                close_pos = Some((line_idx, col));
+                break 'forward;
+            }
+            prev_backslash = ch == '\\' && !prev_backslash;
+        }
+    }
+
+    let (close_line, close_col) = close_pos?;
+
+    Some(TextRange {
+        start_line: open_line,
+        start_col: open_col,
+        end_line: close_line,
+        end_col: close_col + 1,
+    })
+}
+
 fn shrink_range(buffer: &Buffer, range: &TextRange) -> TextRange {
     let content = extract_range_text(buffer, range);
 
@@ -1312,7 +1620,12 @@ fn shrink_range(buffer: &Buffer, range: &TextRange) -> TextRange {
 
     let is_delimited = matches!(
         (first_char, last_char),
-        (Some('('), Some(')')) | (Some('{'), Some('}')) | (Some('['), Some(']'))
+        (Some('('), Some(')'))
+            | (Some('{'), Some('}'))
+            | (Some('['), Some(']'))
+            | (Some('"'), Some('"'))
+            | (Some('\''), Some('\''))
+            | (Some('`'), Some('`'))
     );
 
     if is_delimited {
@@ -3291,5 +3604,452 @@ mod tests {
         let res = resolved.resolutions.get(path).unwrap();
         assert_eq!(res.component_range.start_col, 14);
         assert_eq!(res.component_range.end_col, 23);
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    // find_innermost_delimiter
+
+    #[test]
+    fn find_innermost_delimiter_parens_basic() {
+        // "foo(bar, baz)" cursor at col 4 — '(' at 3, ')' at 12, end_col=13
+        let buffer = buf(&["foo(bar, baz)"]);
+        let result = find_innermost_delimiter(&buffer, 0, 4, "/buf").unwrap();
+        assert_eq!(result.start_line, 0);
+        assert_eq!(result.start_col, 3);
+        assert_eq!(result.end_line, 0);
+        assert_eq!(result.end_col, 13);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_braces() {
+        // "if true { x + 1 }" cursor at col 10 — '{' at 8, '}' at 16, end_col=17
+        let buffer = buf(&["if true { x + 1 }"]);
+        let result = find_innermost_delimiter(&buffer, 0, 10, "/buf").unwrap();
+        assert_eq!(result.start_col, 8);
+        assert_eq!(result.end_col, 17);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_double_quotes() {
+        // let s = "hello"; cursor at col 10 — '"' at 8, '"' at 14, end_col=15
+        let buffer = buf(&[r#"let s = "hello";"#]);
+        let result = find_innermost_delimiter(&buffer, 0, 10, "/buf").unwrap();
+        assert_eq!(result.start_col, 8);
+        assert_eq!(result.end_col, 15);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_nested_picks_innermost() {
+        // "foo({ bar })" cursor at col 6 — inner '{' at 4, '}' at 10, end_col=11
+        let buffer = buf(&["foo({ bar })"]);
+        let result = find_innermost_delimiter(&buffer, 0, 6, "/buf").unwrap();
+        assert_eq!(result.start_col, 4);
+        assert_eq!(result.end_col, 11);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_empty_parens() {
+        // "f()" cursor at col 2 — '(' at 1, ')' at 2, end_col=3
+        let buffer = buf(&["f()"]);
+        let result = find_innermost_delimiter(&buffer, 0, 2, "/buf").unwrap();
+        assert_eq!(result.start_col, 1);
+        assert_eq!(result.end_col, 3);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_multi_line_braces() {
+        // ["fn f() {", "    x", "}"] cursor at (1,4) — '{' at (0,7), '}' at (2,0), end_col=1
+        let buffer = buf(&["fn f() {", "    x", "}"]);
+        let result = find_innermost_delimiter(&buffer, 1, 4, "/buf").unwrap();
+        assert_eq!(result.start_line, 0);
+        assert_eq!(result.start_col, 7);
+        assert_eq!(result.end_line, 2);
+        assert_eq!(result.end_col, 1);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_no_delimiter_errors() {
+        let buffer = buf(&["abc"]);
+        let result = find_innermost_delimiter(&buffer, 0, 1, "/buf");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn find_innermost_delimiter_double_backslash_does_not_escape_quote() {
+        // Buffer: `"a\\"b"` — chars: " a \ \ " b "  (indices 0..=6)
+        // The pair `\\` is an escaped backslash; the next `"` at col 4 is NOT
+        // escaped and closes the first quote pair. With cursor at col 2 (on 'a'),
+        // the algorithm must pick the [0, 4] pair (5 chars including both `"`s).
+        let buffer = buf(&[r#""a\\"b""#]);
+        let result = find_innermost_delimiter(&buffer, 0, 2, "/buf").unwrap();
+        assert_eq!(result.start_col, 0);
+        assert_eq!(result.end_col, 5);
+    }
+
+    #[test]
+    fn find_innermost_delimiter_cursor_on_close_paren() {
+        // "foo(bar)" cursor at col 7 (the ')') — '(' at 3, ')' at 7, end_col=8
+        let buffer = buf(&["foo(bar)"]);
+        let result = find_innermost_delimiter(&buffer, 0, 7, "/buf").unwrap();
+        assert_eq!(result.start_col, 3);
+        assert_eq!(result.end_col, 8);
+    }
+
+    // Delimiter scope full resolve — Self_ and Contents components
+
+    #[test]
+    fn delimiter_scope_self_returns_full_delimiter_range() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["foo(bar, baz)"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        // ceds = Change Entire Delimiter Self — cursor inside parens
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Delimiter,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.scope_range.start_col, 3);
+        assert_eq!(res.scope_range.end_col, 13);
+        assert_eq!(res.component_range.start_col, 3);
+        assert_eq!(res.component_range.end_col, 13);
+    }
+
+    #[test]
+    fn delimiter_scope_contents_shrinks_past_open_delimiter() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["foo(bar, baz)"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        // cedc = Change Entire Delimiter Contents — contents starts after '(' and ends before ')'
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Delimiter,
+            Component::Contents,
+            None,
+            None,
+            Some((0, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Contents excludes both delimiters: [4, 12) covers "bar, baz"
+        assert_eq!(res.component_range.start_col, 4);
+        assert_eq!(res.component_range.end_col, 12);
+    }
+
+    #[test]
+    fn delimiter_inside_self_on_quotes_strips_both_quote_chars() {
+        // `cids` on a string literal must shrink past both `"` chars.
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &[r#"let s = "hello";"#]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Delimiter,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 11)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // `"hello"` lives at [8, 15); stripping both quotes -> [9, 14) covers "hello"
+        assert_eq!(res.target_ranges[0].start_col, 9);
+        assert_eq!(res.target_ranges[0].end_col, 14);
+    }
+
+    #[test]
+    fn delimiter_entire_contents_on_braces_excludes_both_braces() {
+        // `cedc` on a brace block: Contents covers strictly between `{` and `}`.
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["{ block }"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Delimiter,
+            Component::Contents,
+            None,
+            None,
+            Some((0, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // "{ block }" -> scope [0, 9). Contents [1, 8) covers " block ".
+        assert_eq!(res.component_range.start_col, 1);
+        assert_eq!(res.component_range.end_col, 8);
+    }
+
+    // Positional::To
+
+    #[test]
+    fn positional_to_from_cursor_to_component_end() {
+        let buffer = buf(&["fn foo(x: i32) {}"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 18,
+        };
+        let comp = TextRange {
+            start_line: 0,
+            start_col: 6,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Change,
+            Positional::To,
+            Scope::Function,
+            Component::Parameters,
+            None,
+            None,
+            Some((0, 2)),
+        );
+        let result = apply_positional(&q, &buffer, &scope, &comp, "/buf").unwrap();
+        assert_eq!(result[0].start_line, 0);
+        assert_eq!(result[0].start_col, 2);
+        assert_eq!(result[0].end_col, 14);
+    }
+
+    #[test]
+    fn positional_to_requires_cursor_pos() {
+        let buffer = buf(&["fn foo(x: i32) {}"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 18,
+        };
+        let comp = TextRange {
+            start_line: 0,
+            start_col: 6,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Change,
+            Positional::To,
+            Scope::Function,
+            Component::Parameters,
+            None,
+            None,
+            None,
+        );
+        assert!(apply_positional(&q, &buffer, &scope, &comp, "/buf").is_err());
+    }
+
+    // Jump action — resolve_cursor_and_mode
+
+    #[test]
+    fn cursor_mode_jump_goes_to_edit_mode() {
+        let range = TextRange {
+            start_line: 3,
+            start_col: 7,
+            end_line: 5,
+            end_col: 0,
+        };
+        let q = query(
+            Action::Jump,
+            Positional::Entire,
+            Scope::Function,
+            Component::Self_,
+            None,
+            None,
+            None,
+        );
+        let (cursor, mode) = resolve_cursor_and_mode(&q, &range);
+        assert_eq!(cursor, Some(CursorPosition { line: 3, col: 7 }));
+        assert_eq!(mode, Some(EditorMode::Edit));
+    }
+
+    #[test]
+    fn jump_entire_function_name_sets_cursor_destination() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {", "    x", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(
+            path,
+            vec![sym_sel("foo", SymbolKind::Function, 0, 0, 2, 1, 0, 3, 0, 6)],
+        );
+
+        let q = query(
+            Action::Jump,
+            Positional::Entire,
+            Scope::Function,
+            Component::Name,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(
+            res.cursor_destination,
+            Some(CursorPosition { line: 0, col: 3 })
+        );
+        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+    }
+
+    #[test]
+    fn jump_does_not_set_replacement() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 0, 0, 1, 1)]);
+
+        let q = query(
+            Action::Jump,
+            Positional::Entire,
+            Scope::Function,
+            Component::Self_,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(res.replacement.is_none());
+        assert!(res.cursor_destination.is_some());
+    }
+
+    #[test]
+    fn jump_outside_function_beginning_lands_on_previous_line() {
+        // Buffer with a function starting on line 1. jofb must jump to end of line 0.
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["// preamble line", "fn foo() {", "    x", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 1, 0, 3, 1)]);
+
+        let q = query(
+            Action::Jump,
+            Positional::Outside,
+            Scope::Function,
+            Component::Beginning,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let dest = res.cursor_destination.unwrap();
+        assert_eq!(dest.line, 0);
+        assert_eq!(dest.col, "// preamble line".chars().count());
+        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+    }
+
+    #[test]
+    fn jump_outside_function_end_lands_on_next_line() {
+        // Function ends on line 3; jofe must jump to (4, 0).
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "// preamble",
+                "fn foo() {",
+                "    x",
+                "}",
+                "// trailing line",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 1, 0, 3, 1)]);
+
+        let q = query(
+            Action::Jump,
+            Positional::Outside,
+            Scope::Function,
+            Component::End,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let dest = res.cursor_destination.unwrap();
+        assert_eq!(dest.line, 4);
+        assert_eq!(dest.col, 0);
+        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+    }
+
+    #[test]
+    fn jump_outside_function_beginning_at_buffer_start_clamps_to_origin() {
+        // Function starts on line 0; no line before it. jofb lands at (0, 0).
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {", "    x", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 0, 0, 2, 1)]);
+
+        let q = query(
+            Action::Jump,
+            Positional::Outside,
+            Scope::Function,
+            Component::Beginning,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let dest = res.cursor_destination.unwrap();
+        assert_eq!(dest.line, 0);
+        assert_eq!(dest.col, 0);
+    }
+
+    #[test]
+    fn jump_delimiter_scope_sets_cursor_to_open_delimiter() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["foo(bar, baz)"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        // jeds = Jump Entire Delimiter Self — cursor inside parens
+        let q = query(
+            Action::Jump,
+            Positional::Entire,
+            Scope::Delimiter,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 4)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Jump cursor goes to start of target range (the '(' at col 3)
+        assert_eq!(
+            res.cursor_destination,
+            Some(CursorPosition { line: 0, col: 3 })
+        );
+        assert_eq!(res.mode_after, Some(EditorMode::Edit));
     }
 }

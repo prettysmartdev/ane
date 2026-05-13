@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::commands::chord::FrontendCapabilities;
 use crate::commands::chord_engine::types::ChordAction;
 use crate::commands::lsp_engine::InstallProgress;
 use crate::data::state::EditorState;
@@ -38,6 +39,12 @@ impl Default for CliFrontend {
 impl CliFrontend {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl FrontendCapabilities for CliFrontend {
+    fn is_interactive(&self) -> bool {
+        false
     }
 }
 
@@ -135,5 +142,13 @@ mod tests {
             "yank must not modify buffer lines"
         );
         assert!(!buf.dirty, "yank must not mark buffer dirty");
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    #[test]
+    fn cli_frontend_is_not_interactive() {
+        let frontend = CliFrontend::new();
+        assert!(!frontend.is_interactive());
     }
 }

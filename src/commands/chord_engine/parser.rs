@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-use crate::data::chord_types::{is_valid_combination, Action, Component, Positional, Scope};
+use crate::data::chord_types::{
+    is_valid_combination, is_valid_jump_combination, Action, Component, Positional, Scope,
+};
 
 use super::errors::ChordError;
 use super::types::{ChordArgs, ChordQuery};
@@ -167,7 +169,33 @@ fn try_parse_short_form(
         return Err(ChordError::invalid_combination(scope, component).into());
     }
 
+    if matches!(scope, Scope::Delimiter)
+        && matches!(positional, Positional::Next | Positional::Previous)
+    {
+        return Err(ChordError::parse(
+            _original_input,
+            0,
+            "Next/Previous positional is not valid for Delimiter scope",
+        )
+        .into());
+    }
+
+    if action == Action::Jump && !is_valid_jump_combination(positional, component) {
+        let msg = if positional == Positional::Outside {
+            "Jump with Outside positional requires Beginning or End component to specify direction"
+        } else {
+            "Jump does not operate on Value, Parameters, or Arguments components"
+        };
+        return Err(ChordError::parse(_original_input, 0, msg).into());
+    }
+
     let args = parse_args(raw_args);
+
+    if action == Action::Jump && args.value.is_some() {
+        return Err(
+            ChordError::parse(_original_input, 0, "Jump does not accept a value argument").into(),
+        );
+    }
 
     Ok(Some(ChordQuery {
         action,
@@ -205,7 +233,33 @@ fn try_parse_long_form(
         return Err(ChordError::invalid_combination(scope, component).into());
     }
 
+    if matches!(scope, Scope::Delimiter)
+        && matches!(positional, Positional::Next | Positional::Previous)
+    {
+        return Err(ChordError::parse(
+            _original_input,
+            0,
+            "Next/Previous positional is not valid for Delimiter scope",
+        )
+        .into());
+    }
+
+    if action == Action::Jump && !is_valid_jump_combination(positional, component) {
+        let msg = if positional == Positional::Outside {
+            "Jump with Outside positional requires Beginning or End component to specify direction"
+        } else {
+            "Jump does not operate on Value, Parameters, or Arguments components"
+        };
+        return Err(ChordError::parse(_original_input, 0, msg).into());
+    }
+
     let args = parse_args(raw_args);
+
+    if action == Action::Jump && args.value.is_some() {
+        return Err(
+            ChordError::parse(_original_input, 0, "Jump does not accept a value argument").into(),
+        );
+    }
 
     Ok(Some(ChordQuery {
         action,
@@ -226,6 +280,7 @@ fn parse_long_action(input: &str) -> Option<(Action, &str)> {
         ("Append", Action::Append),
         ("Prepend", Action::Prepend),
         ("Insert", Action::Insert),
+        ("Jump", Action::Jump),
     ];
     for (prefix, action) in pairs {
         if let Some(rest) = input.strip_prefix(prefix) {
@@ -245,6 +300,7 @@ fn parse_long_positional(input: &str) -> Option<(Positional, &str)> {
         ("Previous", Positional::Previous),
         ("Entire", Positional::Entire),
         ("Outside", Positional::Outside),
+        ("To", Positional::To),
     ];
     for (prefix, positional) in pairs {
         if let Some(rest) = input.strip_prefix(prefix) {
@@ -258,6 +314,7 @@ fn parse_long_scope(input: &str) -> Option<(Scope, &str)> {
     let pairs = [
         ("Function", Scope::Function),
         ("Variable", Scope::Variable),
+        ("Delimiter", Scope::Delimiter),
         ("Buffer", Scope::Buffer),
         ("Struct", Scope::Struct),
         ("Member", Scope::Member),
@@ -291,9 +348,9 @@ fn suggest_chord(input: &str) -> Option<String> {
         return None;
     }
 
-    let actions = ['c', 'r', 'd', 'y', 'a', 'p', 'i'];
-    let positionals = ['i', 'u', 'a', 'b', 'n', 'p', 'e', 'o'];
-    let scopes = ['l', 'b', 'f', 'v', 's', 'm'];
+    let actions = ['c', 'r', 'd', 'y', 'a', 'p', 'i', 'j'];
+    let positionals = ['i', 'u', 'a', 'b', 'n', 'p', 'e', 'o', 't'];
+    let scopes = ['l', 'b', 'f', 'v', 's', 'm', 'd'];
     let components = ['b', 'c', 'e', 'v', 'p', 'a', 'n', 's'];
 
     let mut best_dist = usize::MAX;
@@ -349,7 +406,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use crate::data::chord_types::{is_valid_combination, Action, Component, Positional, Scope};
+    use crate::data::chord_types::{
+        is_valid_combination, is_valid_jump_combination, Action, Component, Positional, Scope,
+    };
 
     const ALL_ACTIONS: &[Action] = &[
         Action::Change,
@@ -359,6 +418,7 @@ mod tests {
         Action::Append,
         Action::Prepend,
         Action::Insert,
+        Action::Jump,
     ];
 
     const ALL_POSITIONALS: &[Positional] = &[
@@ -370,6 +430,7 @@ mod tests {
         Positional::Previous,
         Positional::Entire,
         Positional::Outside,
+        Positional::To,
     ];
 
     const ALL_SCOPES: &[Scope] = &[
@@ -379,6 +440,7 @@ mod tests {
         Scope::Variable,
         Scope::Struct,
         Scope::Member,
+        Scope::Delimiter,
     ];
 
     const ALL_COMPONENTS: &[Component] = &[
@@ -406,7 +468,14 @@ mod tests {
                             comp.short()
                         );
                         let result = parse(&short);
-                        if is_valid_combination(scope, comp) {
+                        let scope_comp_valid = is_valid_combination(scope, comp);
+                        let jump_valid =
+                            action != Action::Jump || is_valid_jump_combination(pos, comp);
+                        let delimiter_positional_valid = scope != Scope::Delimiter
+                            || !matches!(pos, Positional::Next | Positional::Previous);
+                        let should_parse =
+                            scope_comp_valid && jump_valid && delimiter_positional_valid;
+                        if should_parse {
                             let q = result.unwrap_or_else(|e| {
                                 panic!("expected {short} to parse OK, got: {e}")
                             });
@@ -438,6 +507,14 @@ mod tests {
                 for &scope in ALL_SCOPES {
                     for &comp in ALL_COMPONENTS {
                         if !is_valid_combination(scope, comp) {
+                            continue;
+                        }
+                        if action == Action::Jump && !is_valid_jump_combination(pos, comp) {
+                            continue;
+                        }
+                        if scope == Scope::Delimiter
+                            && matches!(pos, Positional::Next | Positional::Previous)
+                        {
                             continue;
                         }
                         let long = format!("{action}{pos}{scope}{comp}");
@@ -755,6 +832,89 @@ mod tests {
     #[test]
     fn unicode_input_does_not_panic_in_suggest() {
         let result = parse("cłfv");
+        assert!(result.is_err());
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    #[test]
+    fn jump_outside_invalid_component_rejects_with_direction_hint() {
+        // joln = Jump Outside Line Name — valid scope/component, invalid jump+outside
+        let result = parse("joln");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Beginning") || msg.contains("End") || msg.contains("direction"),
+            "expected direction hint in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn jump_outside_beginning_and_end_are_valid() {
+        // jolb = Jump Outside Line Beginning; jole = Jump Outside Line End
+        assert!(parse("jolb").is_ok(), "jolb should parse OK");
+        assert!(parse("jole").is_ok(), "jole should parse OK");
+    }
+
+    #[test]
+    fn jump_outside_other_components_fail() {
+        // Name and Self_ are valid scope/component combos but invalid for Jump+Outside
+        assert!(parse("joln").is_err(), "joln (Name) should fail");
+        assert!(parse("jols").is_err(), "jols (Self_) should fail");
+        // Parameters is a valid Function component but invalid for Jump+Outside
+        assert!(parse("jofp").is_err(), "jofp (Parameters) should fail");
+    }
+
+    #[test]
+    fn jump_non_outside_valid_combinations() {
+        assert!(
+            parse("jtfc").is_ok(),
+            "jtfc (To Function Contents) should parse OK"
+        );
+        assert!(
+            parse("jnfn").is_ok(),
+            "jnfn (Next Function Name) should parse OK"
+        );
+        assert!(
+            parse("jifc").is_ok(),
+            "jifc (Inside Function Contents) should parse OK"
+        );
+    }
+
+    #[test]
+    fn jump_with_value_argument_rejects() {
+        let result = parse(r#"jtfc(value:"text")"#);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("value") || msg.contains("Jump"),
+            "expected value/Jump in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn jump_bare_short_form_no_args_required() {
+        assert!(parse("jtfc").is_ok());
+        assert!(parse("jolb").is_ok());
+        assert!(parse("jefc").is_ok());
+    }
+
+    #[test]
+    fn delimiter_scope_next_positional_rejects() {
+        // cnds = Change Next Delimiter Self_ — Delimiter does not support Next
+        let result = parse("cnds");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Delimiter") || msg.contains("Next") || msg.contains("Previous"),
+            "expected Delimiter/Next in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn delimiter_scope_previous_positional_rejects() {
+        // cpds = Change Previous Delimiter Self_
+        let result = parse("cpds");
         assert!(result.is_err());
     }
 }

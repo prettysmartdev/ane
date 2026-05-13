@@ -5,6 +5,7 @@ use ane::commands::chord::execute_chord;
 use ane::commands::chord_engine::ChordEngine;
 use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use ane::data::chord_types::{Action, Component, Positional, Scope};
+use ane::frontend::cli_frontend::CliFrontend;
 
 const MOCK_SERVER: &str = env!("CARGO_BIN_EXE_mock_lsp_server");
 
@@ -59,7 +60,7 @@ fn auto_submit_short_cifn_apply_produces_nonempty_diff() {
     query.args.value = Some("new_main".to_string());
 
     let mut lsp = LspEngine::new(config);
-    let result = execute_chord(f.path(), &query, &mut lsp).unwrap();
+    let result = execute_chord(&CliFrontend, f.path(), &query, &mut lsp).unwrap();
     assert_ne!(
         result.original, result.modified,
         "expected a non-empty diff for cifn rename"

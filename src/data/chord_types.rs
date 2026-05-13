@@ -9,6 +9,7 @@ pub enum Action {
     Append,
     Prepend,
     Insert,
+    Jump,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -21,6 +22,7 @@ pub enum Positional {
     Previous,
     Entire,
     Outside,
+    To,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +33,7 @@ pub enum Scope {
     Variable,
     Struct,
     Member,
+    Delimiter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +58,7 @@ impl Action {
             Self::Append => "a",
             Self::Prepend => "p",
             Self::Insert => "i",
+            Self::Jump => "j",
         }
     }
 
@@ -67,8 +71,13 @@ impl Action {
             "a" => Some(Self::Append),
             "p" => Some(Self::Prepend),
             "i" => Some(Self::Insert),
+            "j" => Some(Self::Jump),
             _ => None,
         }
+    }
+
+    pub fn requires_interactive(&self) -> bool {
+        matches!(self, Self::Jump)
     }
 }
 
@@ -83,6 +92,7 @@ impl Positional {
             Self::Previous => "p",
             Self::Entire => "e",
             Self::Outside => "o",
+            Self::To => "t",
         }
     }
 
@@ -96,6 +106,7 @@ impl Positional {
             "p" => Some(Self::Previous),
             "e" => Some(Self::Entire),
             "o" => Some(Self::Outside),
+            "t" => Some(Self::To),
             _ => None,
         }
     }
@@ -110,6 +121,7 @@ impl Scope {
             Self::Variable => "v",
             Self::Struct => "s",
             Self::Member => "m",
+            Self::Delimiter => "d",
         }
     }
 
@@ -121,12 +133,13 @@ impl Scope {
             "v" => Some(Self::Variable),
             "s" => Some(Self::Struct),
             "m" => Some(Self::Member),
+            "d" => Some(Self::Delimiter),
             _ => None,
         }
     }
 
     pub fn requires_lsp(&self) -> bool {
-        !matches!(self, Self::Line | Self::Buffer)
+        !matches!(self, Self::Line | Self::Buffer | Self::Delimiter)
     }
 }
 
@@ -161,6 +174,14 @@ impl Component {
 
 pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     match (scope, component) {
+        (Scope::Delimiter, Component::Beginning) => true,
+        (Scope::Delimiter, Component::Contents) => true,
+        (Scope::Delimiter, Component::End) => true,
+        (Scope::Delimiter, Component::Self_) => true,
+        (Scope::Delimiter, Component::Name) => true,
+        (Scope::Delimiter, Component::Value) => false,
+        (Scope::Delimiter, Component::Parameters) => false,
+        (Scope::Delimiter, Component::Arguments) => false,
         (_, Component::End | Component::Name | Component::Self_) => true,
         (Scope::Line | Scope::Buffer, Component::Beginning) => true,
         (_, Component::Beginning) => false,
@@ -176,6 +197,16 @@ pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     }
 }
 
+pub fn is_valid_jump_combination(positional: Positional, component: Component) -> bool {
+    match positional {
+        Positional::Outside => matches!(component, Component::Beginning | Component::End),
+        _ => !matches!(
+            component,
+            Component::Value | Component::Parameters | Component::Arguments
+        ),
+    }
+}
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -186,6 +217,7 @@ impl fmt::Display for Action {
             Self::Append => write!(f, "Append"),
             Self::Prepend => write!(f, "Prepend"),
             Self::Insert => write!(f, "Insert"),
+            Self::Jump => write!(f, "Jump"),
         }
     }
 }
@@ -201,6 +233,7 @@ impl fmt::Display for Positional {
             Self::Previous => write!(f, "Previous"),
             Self::Entire => write!(f, "Entire"),
             Self::Outside => write!(f, "Outside"),
+            Self::To => write!(f, "To"),
         }
     }
 }
@@ -214,6 +247,7 @@ impl fmt::Display for Scope {
             Self::Variable => write!(f, "Variable"),
             Self::Struct => write!(f, "Struct"),
             Self::Member => write!(f, "Member"),
+            Self::Delimiter => write!(f, "Delimiter"),
         }
     }
 }
@@ -247,6 +281,7 @@ mod tests {
             Action::Append,
             Action::Prepend,
             Action::Insert,
+            Action::Jump,
         ] {
             let short = action.short();
             assert_eq!(Action::from_short(short), Some(action));
@@ -264,6 +299,7 @@ mod tests {
             Positional::Previous,
             Positional::Entire,
             Positional::Outside,
+            Positional::To,
         ] {
             let short = positional.short();
             assert_eq!(Positional::from_short(short), Some(positional));
@@ -279,6 +315,7 @@ mod tests {
             Scope::Variable,
             Scope::Struct,
             Scope::Member,
+            Scope::Delimiter,
         ] {
             let short = scope.short();
             assert_eq!(Scope::from_short(short), Some(scope));
@@ -345,9 +382,9 @@ mod tests {
 
     #[test]
     fn each_position_has_unique_short_letters() {
-        let actions = ["c", "r", "d", "y", "a", "p", "i"];
-        let positionals = ["i", "u", "a", "b", "n", "p", "e", "o"];
-        let scopes = ["l", "b", "f", "v", "s", "m"];
+        let actions = ["c", "r", "d", "y", "a", "p", "i", "j"];
+        let positionals = ["i", "u", "a", "b", "n", "p", "e", "o", "t"];
+        let scopes = ["l", "b", "f", "v", "s", "m", "d"];
         let components = ["b", "c", "e", "v", "p", "a", "n", "s"];
         for set in [&actions[..], &positionals[..], &scopes[..], &components[..]] {
             let mut seen = std::collections::HashSet::new();
@@ -366,6 +403,7 @@ mod tests {
             Scope::Variable,
             Scope::Struct,
             Scope::Member,
+            Scope::Delimiter,
         ];
         let components = [
             Component::Beginning,
@@ -390,5 +428,126 @@ mod tests {
         assert_eq!(format!("{}", Positional::Inside), "Inside");
         assert_eq!(format!("{}", Scope::Function), "Function");
         assert_eq!(format!("{}", Component::Self_), "Self");
+    }
+
+    // --- work item 0005: Jump / To / Delimiter ---
+
+    #[test]
+    fn action_jump_requires_interactive_only() {
+        assert!(Action::Jump.requires_interactive());
+        assert!(!Action::Change.requires_interactive());
+        assert!(!Action::Delete.requires_interactive());
+        assert!(!Action::Replace.requires_interactive());
+        assert!(!Action::Yank.requires_interactive());
+        assert!(!Action::Append.requires_interactive());
+        assert!(!Action::Prepend.requires_interactive());
+        assert!(!Action::Insert.requires_interactive());
+    }
+
+    #[test]
+    fn scope_delimiter_does_not_require_lsp() {
+        assert!(!Scope::Delimiter.requires_lsp());
+    }
+
+    #[test]
+    fn is_valid_jump_combination_outside_beginning_and_end_pass() {
+        assert!(is_valid_jump_combination(
+            Positional::Outside,
+            Component::Beginning
+        ));
+        assert!(is_valid_jump_combination(
+            Positional::Outside,
+            Component::End
+        ));
+    }
+
+    #[test]
+    fn is_valid_jump_combination_outside_other_components_fail() {
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Value
+        ));
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Contents
+        ));
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Arguments
+        ));
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Parameters
+        ));
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Name
+        ));
+        assert!(!is_valid_jump_combination(
+            Positional::Outside,
+            Component::Self_
+        ));
+    }
+
+    #[test]
+    fn is_valid_jump_combination_non_outside_valid_combinations() {
+        assert!(is_valid_jump_combination(
+            Positional::To,
+            Component::Contents
+        ));
+        assert!(is_valid_jump_combination(Positional::Next, Component::Name));
+        assert!(is_valid_jump_combination(
+            Positional::Inside,
+            Component::Contents
+        ));
+    }
+
+    #[test]
+    fn is_valid_jump_combination_value_params_args_always_fail() {
+        for pos in [
+            Positional::Inside,
+            Positional::Until,
+            Positional::After,
+            Positional::Before,
+            Positional::Next,
+            Positional::Previous,
+            Positional::Entire,
+            Positional::To,
+        ] {
+            assert!(
+                !is_valid_jump_combination(pos, Component::Value),
+                "Value should fail for {pos:?}"
+            );
+            assert!(
+                !is_valid_jump_combination(pos, Component::Parameters),
+                "Parameters should fail for {pos:?}"
+            );
+            assert!(
+                !is_valid_jump_combination(pos, Component::Arguments),
+                "Arguments should fail for {pos:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_valid_combination_delimiter_allowed_components() {
+        assert!(is_valid_combination(Scope::Delimiter, Component::Beginning));
+        assert!(is_valid_combination(Scope::Delimiter, Component::Contents));
+        assert!(is_valid_combination(Scope::Delimiter, Component::End));
+        assert!(is_valid_combination(Scope::Delimiter, Component::Self_));
+        assert!(is_valid_combination(Scope::Delimiter, Component::Name));
+    }
+
+    #[test]
+    fn is_valid_combination_delimiter_forbidden_components() {
+        assert!(!is_valid_combination(Scope::Delimiter, Component::Value));
+        assert!(!is_valid_combination(
+            Scope::Delimiter,
+            Component::Parameters
+        ));
+        assert!(!is_valid_combination(
+            Scope::Delimiter,
+            Component::Arguments
+        ));
     }
 }

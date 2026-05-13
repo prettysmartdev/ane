@@ -31,7 +31,10 @@ fn dump_lsp_data_for_variable() {
     let config = LspEngineConfig::default();
     let mut lsp = LspEngine::new(config);
     let files: Vec<&Path> = vec![path];
-    if lsp.start_for_context(path.parent().unwrap(), &files).is_err() {
+    if lsp
+        .start_for_context(path.parent().unwrap(), &files)
+        .is_err()
+    {
         eprintln!("Could not start LSP");
         return;
     }

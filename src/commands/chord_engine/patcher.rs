@@ -126,6 +126,17 @@ fn build_action(
             apply_single_replacement(buffer, &cursor, insertion)
         }
         Action::Yank => unreachable!(),
+        Action::Jump => {
+            return Ok(ChordAction {
+                buffer_name: buffer_name.to_string(),
+                diff: None,
+                yanked_content: None,
+                cursor_destination: resolution.cursor_destination,
+                mode_after: resolution.mode_after,
+                highlight_ranges: vec![resolution.component_range],
+                warnings: vec![],
+            });
+        }
     };
 
     let diff = generate_diff(&original, &modified);
