@@ -357,15 +357,23 @@ fn resolve_variable_scope(
 }
 
 fn find_enclosing_declaration(sel: &crate::data::lsp::types::SelectionRange) -> Option<TextRange> {
-    let inner = &sel.range;
-    let mut current = sel;
+    // The innermost range is typically a zero-width point at the cursor.
+    // Skip it so we compare against the identifier/name range instead.
+    let reference =
+        if sel.range.start_line == sel.range.end_line && sel.range.start_col == sel.range.end_col {
+            sel.parent.as_ref()?
+        } else {
+            sel
+        };
+    let inner = &reference.range;
+    let mut current = reference;
     while let Some(ref parent) = current.parent {
         let r = &parent.range;
-        let starts_before = r.start_line < inner.start_line
-            || (r.start_line == inner.start_line && r.start_col < inner.start_col);
-        let ends_after = r.end_line > inner.end_line
-            || (r.end_line == inner.end_line && r.end_col > inner.end_col);
-        if starts_before || ends_after {
+        let wider = (r.start_line < inner.start_line
+            || (r.start_line == inner.start_line && r.start_col < inner.start_col))
+            || (r.end_line > inner.end_line
+                || (r.end_line == inner.end_line && r.end_col > inner.end_col));
+        if wider {
             return Some(symbol_to_range(r));
         }
         current = parent;
@@ -391,16 +399,12 @@ fn resolve_variable_scope_via_selection_range(
         .selection_range(path, line, col)
         .map_err(|e| ChordError::resolve(buffer_name, format!("LSP selectionRange failed: {e}")))?;
 
+    // Walk the hierarchy and find the smallest range with an interior `=`
+    // (i.e. an assignment — language-agnostic signal for variable declarations).
     let mut current = &sel;
     loop {
         let range = symbol_to_range(&current.range);
-        let text = extract_range_text(buffer, &range);
-        let trimmed = text.trim_start();
-        if trimmed.starts_with("let ")
-            || trimmed.starts_with("let\t")
-            || trimmed.starts_with("const ")
-            || trimmed.starts_with("static ")
-        {
+        if has_interior_assignment(buffer, &range) {
             return Ok(range);
         }
         match current.parent {
@@ -414,6 +418,26 @@ fn resolve_variable_scope_via_selection_range(
         format!("no enclosing variable declaration found at cursor ({line}, {col})"),
     )
     .into())
+}
+
+fn has_interior_assignment(buffer: &Buffer, range: &TextRange) -> bool {
+    let text = extract_range_text(buffer, range);
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '=' && i > 0 && i < chars.len() - 1 {
+            let prev = chars[i - 1];
+            let next = chars[i + 1];
+            let is_compound = matches!(
+                prev,
+                '!' | '<' | '>' | '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^'
+            ) || next == '='
+                || next == '>';
+            if !is_compound {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn resolve_component(
