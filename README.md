@@ -1,3 +1,18 @@
+<p align="center">
+	<strong>Chord based terminal code editor for humans and agents.</strong> 
+	</br>
+	Language server enabled for one-shot CLI edits or interactive TUI editor.
+	</br>
+	</br>
+	<img src="./docs/images/ane-logo.svg" width="320" alt="ane editor">
+</p>
+
+<p align="center">
+	<img src="https://github.com/prettysmartdev/ane/actions/workflows/test.yml/badge.svg">
+</p>
+
+---
+
 # ane
 
 **A New Editor** / **Agent Native Editor**

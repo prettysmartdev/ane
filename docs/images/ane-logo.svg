@@ -1,0 +1,293 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 360" width="1000" height="360">
+  <defs>
+    <!-- Mottled grey base gradient -->
+    <linearGradient id="greyBase" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#5a5d62"/>
+      <stop offset="100%" stop-color="#3e4146"/>
+    </linearGradient>
+
+    <!-- Faded pale blue -->
+    <linearGradient id="paleBlue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#9ab8c8"/>
+      <stop offset="100%" stop-color="#6e8c9e"/>
+    </linearGradient>
+
+    <!-- Faded pale rust -->
+    <linearGradient id="paleRust" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#c08866"/>
+      <stop offset="100%" stop-color="#925f42"/>
+    </linearGradient>
+
+    <!-- Vibrant neon-blue tube gradient -->
+    <linearGradient id="neonBlue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"  stop-color="#e8f8ff"/>
+      <stop offset="50%" stop-color="#5fc6ff"/>
+      <stop offset="100%" stop-color="#2a9ed8"/>
+    </linearGradient>
+
+    <!-- Stronger neon glow filter -->
+    <filter id="neonGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2"  in="SourceGraphic" result="b1"/>
+      <feGaussianBlur stdDeviation="6"  in="SourceGraphic" result="b2"/>
+      <feGaussianBlur stdDeviation="14" in="SourceGraphic" result="b3"/>
+      <feGaussianBlur stdDeviation="28" in="SourceGraphic" result="b4"/>
+      <feMerge>
+        <feMergeNode in="b4"/>
+        <feMergeNode in="b3"/>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Mottled blotchy texture -->
+    <filter id="mottle" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="3" seed="9" result="bigNoise"/>
+      <feColorMatrix in="bigNoise" values="0 0 0 0 0.35
+                                            0 0 0 0 0.37
+                                            0 0 0 0 0.40
+                                            0 0 0 0.85 0"/>
+    </filter>
+
+    <!-- Fine grain -->
+    <filter id="grain" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="7"/>
+      <feColorMatrix values="0 0 0 0 0.08
+                             0 0 0 0 0.08
+                             0 0 0 0 0.08
+                             0 0 0 0.25 0"/>
+    </filter>
+
+    <clipPath id="panelClip">
+      <path d="M 90 80 L 910 80 L 940 162 L 910 244 L 90 244 L 60 162 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- =========================================================
+       MAIN SIGN PANEL: mottled grey
+       ========================================================= -->
+
+  <path d="M 90 86 L 910 86 L 940 168 L 910 250 L 90 250 L 60 168 Z"
+        fill="#1a1a1a"
+        opacity="0.25"
+        transform="translate(6,8)"/>
+
+  <path d="M 90 80 L 910 80 L 940 162 L 910 244 L 90 244 L 60 162 Z"
+        fill="url(#greyBase)"
+        stroke="#1c1d20"
+        stroke-width="5"
+        stroke-linejoin="round"/>
+
+  <g clip-path="url(#panelClip)">
+    <rect x="60" y="80" width="880" height="170"
+          filter="url(#mottle)"
+          opacity="0.65"
+          style="mix-blend-mode: overlay"/>
+    <rect x="60" y="80" width="880" height="170"
+          filter="url(#mottle)"
+          opacity="0.4"
+          style="mix-blend-mode: multiply"/>
+    <g transform="translate(120, 0)">
+      <rect x="60" y="80" width="880" height="170"
+            filter="url(#mottle)"
+            opacity="0.3"
+            style="mix-blend-mode: screen"/>
+    </g>
+  </g>
+
+  <path d="M 102 92 L 898 92 L 922 162 L 898 232 L 102 232 L 78 162 Z"
+        fill="none"
+        stroke="#8a8d92"
+        stroke-width="2"
+        stroke-linejoin="round"
+        opacity="0.5"/>
+
+  <!-- =========================================================
+       TOP BANNER: pale blue, "a new editor"
+       Banner now matches bottom width: x runs 248 -> 752 with 22-unit pointed ends
+       (same geometry as the bottom, just at the top y range)
+       ========================================================= -->
+  <g>
+    <path d="M 270 20 L 730 20 L 752 46 L 730 72 L 270 72 L 248 46 Z"
+          fill="#1a1a1a" opacity="0.25" transform="translate(4,5)"/>
+    <path d="M 270 16 L 730 16 L 752 42 L 730 68 L 270 68 L 248 42 Z"
+          fill="url(#paleBlue)"
+          stroke="#1a2a34"
+          stroke-width="3.5"
+          stroke-linejoin="round"/>
+    <path d="M 280 26 L 720 26 L 738 42 L 720 58 L 280 58 L 262 42 Z"
+          fill="none"
+          stroke="#efe3c8"
+          stroke-width="1.2"
+          opacity="0.7"/>
+    <text x="500" y="42"
+          font-family="'Georgia', 'Times', serif"
+          font-size="26"
+          font-weight="700"
+          font-style="italic"
+          letter-spacing="6"
+          text-anchor="middle"
+          dominant-baseline="central"
+          fill="#efe3c8">
+      a new editor
+    </text>
+  </g>
+
+  <g stroke="#2a2419" stroke-width="3" fill="none">
+    <line x1="380" y1="68" x2="380" y2="80"/>
+    <line x1="620" y1="68" x2="620" y2="80"/>
+  </g>
+  <g fill="#2a2419">
+    <circle cx="380" cy="68" r="2.2"/>
+    <circle cx="380" cy="80" r="2.2"/>
+    <circle cx="620" cy="68" r="2.2"/>
+    <circle cx="620" cy="80" r="2.2"/>
+  </g>
+
+  <!-- =========================================================
+       MAIN WORDMARK: vibrant blue neon "ane", more spaced
+       ========================================================= -->
+  <g>
+    <!-- Soft wide ambient bloom (very diffuse) -->
+    <g opacity="0.5" filter="url(#neonGlow)">
+      <text x="500" y="200"
+            font-family="'Courier New', 'Consolas', monospace"
+            font-size="170"
+            font-weight="700"
+            letter-spacing="70"
+            text-anchor="middle"
+            fill="none"
+            stroke="#5fc6ff"
+            stroke-width="9"
+            stroke-linejoin="round"
+            stroke-linecap="round">
+        ane
+      </text>
+    </g>
+
+    <!-- Dark tube backing -->
+    <text x="500" y="200"
+          font-family="'Courier New', 'Consolas', monospace"
+          font-size="170"
+          font-weight="700"
+          letter-spacing="70"
+          text-anchor="middle"
+          fill="none"
+          stroke="#0e1f2c"
+          stroke-width="12"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          opacity="0.75">
+      ane
+    </text>
+
+    <!-- Outer tube color (saturated blue) -->
+    <text x="500" y="200"
+          font-family="'Courier New', 'Consolas', monospace"
+          font-size="170"
+          font-weight="700"
+          letter-spacing="70"
+          text-anchor="middle"
+          fill="none"
+          stroke="#1f8ac9"
+          stroke-width="9"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          opacity="0.95">
+      ane
+    </text>
+
+    <!-- Mid tube glow -->
+    <text x="500" y="200"
+          font-family="'Courier New', 'Consolas', monospace"
+          font-size="170"
+          font-weight="700"
+          letter-spacing="70"
+          text-anchor="middle"
+          fill="none"
+          stroke="url(#neonBlue)"
+          stroke-width="6"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          opacity="1">
+      ane
+    </text>
+
+    <!-- Hot white core -->
+    <text x="500" y="200"
+          font-family="'Courier New', 'Consolas', monospace"
+          font-size="170"
+          font-weight="700"
+          letter-spacing="70"
+          text-anchor="middle"
+          fill="none"
+          stroke="#ffffff"
+          stroke-width="2.5"
+          stroke-linejoin="round"
+          stroke-linecap="round"
+          opacity="1">
+      ane
+    </text>
+  </g>
+
+  <!-- =========================================================
+       BOTTOM BANNER: pale purple, "agent-native editor"
+       ========================================================= -->
+  <g>
+    <line x1="420" y1="244" x2="420" y2="256" stroke="#2a2419" stroke-width="3"/>
+    <line x1="580" y1="244" x2="580" y2="256" stroke="#2a2419" stroke-width="3"/>
+    <circle cx="420" cy="244" r="2.2" fill="#2a2419"/>
+    <circle cx="420" cy="256" r="2.2" fill="#2a2419"/>
+    <circle cx="580" cy="244" r="2.2" fill="#2a2419"/>
+    <circle cx="580" cy="256" r="2.2" fill="#2a2419"/>
+
+    <!-- Geometry matched to top banner: x 248..752, with pointed ends -->
+    <path d="M 270 260 L 730 260 L 752 284 L 730 308 L 270 308 L 248 284 Z"
+          fill="#1a1a1a" opacity="0.25" transform="translate(4,5)"/>
+    <path d="M 270 256 L 730 256 L 752 280 L 730 304 L 270 304 L 248 280 Z"
+          fill="url(#paleRust)"
+          stroke="#2a1610"
+          stroke-width="3.5"
+          stroke-linejoin="round"/>
+    <path d="M 280 266 L 720 266 L 738 280 L 720 294 L 280 294 L 262 280 Z"
+          fill="none"
+          stroke="#efe3c8"
+          stroke-width="1.2"
+          opacity="0.6"/>
+    <text x="500" y="280"
+          font-family="'Courier New', monospace"
+          font-size="26"
+          font-weight="700"
+          letter-spacing="5"
+          text-anchor="middle"
+          dominant-baseline="central"
+          fill="#efe3c8">
+      agent-native editor
+    </text>
+  </g>
+
+  <!-- Weathering -->
+  <g opacity="0.22" clip-path="url(#panelClip)">
+    <ellipse cx="180" cy="120" rx="40" ry="6" fill="#1a1a1a"/>
+    <ellipse cx="820" cy="215" rx="55" ry="7" fill="#1a1a1a"/>
+    <ellipse cx="430" cy="225" rx="18" ry="3" fill="#1a1a1a"/>
+    <ellipse cx="720" cy="105" rx="22" ry="3" fill="#1a1a1a"/>
+  </g>
+
+  <g fill="#1a1a1a" opacity="0.5" clip-path="url(#panelClip)">
+    <circle cx="150" cy="105" r="1.5"/>
+    <circle cx="155" cy="220" r="1.2"/>
+    <circle cx="320" cy="100" r="1"/>
+    <circle cx="680" cy="225" r="1.3"/>
+    <circle cx="870" cy="115" r="1.5"/>
+    <circle cx="855" cy="225" r="1"/>
+    <circle cx="245" cy="170" r="1.2"/>
+    <circle cx="775" cy="160" r="1"/>
+  </g>
+
+  <g opacity="0.3" style="mix-blend-mode: multiply" clip-path="url(#panelClip)">
+    <rect x="60" y="80" width="880" height="170"
+          fill="#000"
+          filter="url(#grain)"/>
+  </g>
+</svg>
