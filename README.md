@@ -4,7 +4,7 @@
 	Language server enabled for one-shot CLI edits or interactive TUI editor.
 	</br>
 	</br>
-	<img src="./docs/images/ane-logo.svg" width="320" alt="ane editor">
+	<img src="./docs/images/ane-logo.svg" width="620" alt="ane editor">
 </p>
 
 <p align="center">
