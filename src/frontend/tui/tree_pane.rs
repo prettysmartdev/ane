@@ -14,11 +14,7 @@ fn entry_display_width(entry: &FileEntry) -> usize {
 }
 
 pub fn content_width(tree_view: &[FileEntry]) -> usize {
-    tree_view
-        .iter()
-        .map(entry_display_width)
-        .max()
-        .unwrap_or(0)
+    tree_view.iter().map(entry_display_width).max().unwrap_or(0)
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {

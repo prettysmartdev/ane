@@ -305,11 +305,7 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
                 .unwrap_or("");
             if i == cursor {
                 let cursor_display_col = editor_pane::display_col(line, state.cursor_col);
-                let cursor_row_in_line = if text_width > 0 {
-                    cursor_display_col / text_width
-                } else {
-                    0
-                };
+                let cursor_row_in_line = cursor_display_col.checked_div(text_width).unwrap_or(0);
                 visual_rows += cursor_row_in_line + 1;
             } else {
                 visual_rows += editor_pane::visual_row_count(line, text_width);
@@ -555,9 +551,9 @@ fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                 tree_pane::collapse(state, selected);
             } else if let Some(depth) = state.tree_view.get(selected).map(|e| e.depth) {
                 if depth > 0 {
-                    let parent = (0..selected).rev().find(|&j| {
-                        state.tree_view[j].is_dir && state.tree_view[j].depth < depth
-                    });
+                    let parent = (0..selected)
+                        .rev()
+                        .find(|&j| state.tree_view[j].is_dir && state.tree_view[j].depth < depth);
                     if let Some(idx) = parent {
                         state.tree_selected = idx;
                         tree_pane::collapse(state, idx);
@@ -614,12 +610,16 @@ fn handle_chord_mode(
         }
         KeyCode::Up if state.chord_input.is_empty() => {
             state.cursor_line = state.cursor_line.saturating_sub(1);
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
                 state.cursor_col = state.cursor_col.min(line.len());
             }
         }
         KeyCode::Down if state.chord_input.is_empty() => {
-            let next_len = state.current_buffer()
+            let next_len = state
+                .current_buffer()
                 .and_then(|b| b.lines.get(state.cursor_line + 1))
                 .map(|l| l.len());
             if let Some(len) = next_len {
@@ -628,13 +628,20 @@ fn handle_chord_mode(
             }
         }
         KeyCode::Left if state.chord_input.is_empty() => {
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
                 state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
             }
         }
         KeyCode::Right if state.chord_input.is_empty() => {
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
-                state.cursor_col = next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                state.cursor_col =
+                    next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
             }
         }
         KeyCode::Left => {
@@ -788,12 +795,16 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
         }
         KeyCode::Up => {
             state.cursor_line = state.cursor_line.saturating_sub(1);
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
                 state.cursor_col = state.cursor_col.min(line.len());
             }
         }
         KeyCode::Down => {
-            let next_len = state.current_buffer()
+            let next_len = state
+                .current_buffer()
                 .and_then(|b| b.lines.get(state.cursor_line + 1))
                 .map(|l| l.len());
             if let Some(len) = next_len {
@@ -802,13 +813,20 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             }
         }
         KeyCode::Left => {
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
                 state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
             }
         }
         KeyCode::Right => {
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
-                state.cursor_col = next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                state.cursor_col =
+                    next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
             }
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {

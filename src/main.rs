@@ -18,11 +18,27 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Some(Command::Init { agent }) => {
+            if let Err(e) = run_init(&agent) {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        }
         None => {
             tui::app::run(&args.path)?;
         }
     }
 
+    Ok(())
+}
+
+fn run_init(agent_name: &str) -> Result<()> {
+    let config = ane::data::init::init_agent(agent_name, std::path::Path::new("."))?;
+    let skill_path = std::path::Path::new(config.skill_dir).join(config.skill_filename);
+    println!("wrote ane skill to {}", skill_path.display());
+    if let Some(note) = config.manual_note {
+        println!("note: {note}");
+    }
     Ok(())
 }
 

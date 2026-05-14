@@ -1,3 +1,5 @@
+#![cfg(feature = "frontends")]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

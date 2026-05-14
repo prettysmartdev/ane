@@ -49,7 +49,7 @@ pub(crate) fn visual_row_count(line: &str, text_width: usize) -> usize {
     if display_width == 0 {
         return 1;
     }
-    (display_width + text_width - 1) / text_width
+    display_width.div_ceil(text_width)
 }
 
 fn styled_line_with_tokens<'a>(
@@ -187,14 +187,14 @@ pub fn render(
 
                 if is_current {
                     let cursor_display_col = display_col(line_text, state.cursor_col);
-                    let (c_wrap_row, c_col_in_row) = if text_width > 0 {
-                        (
-                            cursor_display_col / text_width,
-                            cursor_display_col % text_width,
-                        )
-                    } else {
-                        (0, cursor_display_col)
-                    };
+                    let (c_wrap_row, c_col_in_row) =
+                        match text_width.checked_div(1).filter(|_| text_width > 0) {
+                            Some(_) => (
+                                cursor_display_col / text_width,
+                                cursor_display_col % text_width,
+                            ),
+                            None => (0, cursor_display_col),
+                        };
                     let max_row = wrapped_rows.len().saturating_sub(1);
                     let (final_row, final_col) = if c_wrap_row > max_row {
                         let last_row_len: usize = wrapped_rows.last().map_or(0, |spans| {
@@ -237,8 +237,9 @@ pub fn render(
                     if state.mode == Mode::Edit && !state.focus_tree {
                         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
                     } else if state.mode == Mode::Chord && !state.focus_tree {
-                        if let Some(cell) =
-                            frame.buffer_mut().cell_mut(Position::new(cursor_x, cursor_y))
+                        if let Some(cell) = frame
+                            .buffer_mut()
+                            .cell_mut(Position::new(cursor_x, cursor_y))
                         {
                             cell.set_style(Style::default().bg(Color::Blue).fg(Color::White));
                         }

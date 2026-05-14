@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
 
 use ane::commands::chord_engine::types::{ChordAction, DiffLine};
@@ -275,11 +274,13 @@ fn multi_buffer_same_chord_applied_to_each() {
 
 // --- CLI: execute_chord applies diff to disk ---
 
+#[cfg(feature = "frontends")]
 #[test]
 fn cli_execute_chord_modifies_file_on_disk() {
     use ane::commands::chord::execute_chord;
     use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
     use ane::frontend::cli_frontend::CliFrontend;
+    use std::io::Write;
 
     let mut f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();
     write!(f, "line one\nline two\nline three").unwrap();
@@ -299,11 +300,13 @@ fn cli_execute_chord_modifies_file_on_disk() {
     assert!(!on_disk.contains("line two"));
 }
 
+#[cfg(feature = "frontends")]
 #[test]
 fn cli_execute_chord_yank_does_not_modify_file() {
     use ane::commands::chord::execute_chord;
     use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
     use ane::frontend::cli_frontend::CliFrontend;
+    use std::io::Write;
 
     let content = "original content\nsecond line";
     let mut f = tempfile::Builder::new().suffix(".rs").tempfile().unwrap();

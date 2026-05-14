@@ -25,6 +25,12 @@ pub enum Command {
         #[arg()]
         path: PathBuf,
     },
+    /// Initialize ane skill for a code agent (writes skill file to agent's directory)
+    Init {
+        /// Agent name (claude, codex, gemini, opencode, cline, maki, charm)
+        #[arg()]
+        agent: String,
+    },
 }
 
 pub fn parse() -> Cli {

@@ -49,7 +49,10 @@ impl ApplyChordAction for TuiFrontend {
                 .map(|l| l.len())
                 .unwrap_or(0);
             let mut col = cursor.col.min(line_len);
-            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
                 while col > 0 && !line.is_char_boundary(col) {
                     col -= 1;
                 }
