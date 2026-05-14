@@ -1,0 +1,189 @@
+# Compared to Other Editors
+
+ane occupies a specific niche: a chord-based terminal editor with built-in LSP and first-class support for headless (agent/script) editing. This page compares ane to other terminal editors, focusing on trade-offs rather than rankings. Every editor on this list is mature, battle-tested, and excellent at what it does.
+
+---
+
+## Vim
+
+[vim.org](https://www.vim.org)
+
+Vim is the most widely installed terminal editor. Its modal editing model (Normal, Insert, Visual, Command-line, plus variants) uses a verb-object grammar: `dw` means "delete word" -- action first, then target.
+
+**Where Vim is stronger:**
+- Massive plugin ecosystem (6,000+ scripts). Virtually any feature you can imagine has a plugin.
+- Decades of community knowledge, tutorials, and answers to every question.
+- Ubiquitous -- installed on nearly every Unix system by default.
+- Extremely mature macro system, registers, marks, and text objects.
+- Buffer/window/tab management for complex multi-file workflows.
+
+**Where ane differs:**
+- Vim has no built-in LSP client. Language-aware editing requires plugins (coc.nvim, vim-lsp, ALE). ane's LSP is built in and chords are language-server-aware by default.
+- Vim has no headless one-shot editing mode. Scripting edits requires `ex` commands or `sed`-like invocations. ane's `exec` mode is designed for agents and pipelines, outputting unified diffs.
+- Vim's grammar is more granular (motions, text objects, counts, registers) but requires memorizing many combinations. ane's 4-part chord grammar is more constrained but more predictable -- every chord is exactly action + positional + scope + component.
+- Vim's extensibility (Vimscript) is a strength and a maintenance burden. ane has no plugin system, which means fewer features but also less configuration drift.
+
+**Choose Vim if** you want maximum flexibility, a massive ecosystem, and are willing to invest in configuration. **Choose ane if** you want built-in LSP chords and agent-friendly headless editing without plugin setup.
+
+---
+
+## Neovim
+
+[neovim.io](https://neovim.io)
+
+Neovim is a modernized fork of Vim with a built-in LSP client, first-class Lua scripting, and tree-sitter integration. It maintains full compatibility with Vim's editing model while adding async I/O, a remote plugin architecture, and a built-in terminal emulator.
+
+**Where Neovim is stronger:**
+- Built-in LSP client *and* tree-sitter for syntax highlighting, code navigation, and text objects. ane has LSP but not tree-sitter.
+- Lua plugin ecosystem is large and actively growing (telescope, nvim-cmp, lazy.nvim, etc.).
+- Full Vim compatibility -- everything you know from Vim works here.
+- Remote plugin API allows extensions in any language via MessagePack RPC.
+- Multiple UIs can attach to a single Neovim instance (client-server model).
+- Much larger community and contributor base.
+
+**Where ane differs:**
+- Neovim still requires plugin configuration for most LSP workflows (nvim-lspconfig, mason.nvim). ane's LSP auto-detects, auto-installs, and works out of the box.
+- Neovim has no built-in headless edit-and-diff mode. Automating edits from a script or agent requires driving Neovim via its RPC API or using `nvim --headless` with Lua commands. ane's `exec` mode is purpose-built for this.
+- Neovim's power comes with configuration complexity. A productive Neovim setup typically involves dozens of plugins and hundreds of lines of Lua. ane requires no configuration.
+- ane exposes a Rust crate API for embedding the chord engine in other tools. Neovim's embedding story is its RPC protocol, which is more powerful but heavier to integrate.
+
+**Choose Neovim if** you want a Vim-compatible editor with modern LSP, tree-sitter, and a rich plugin ecosystem. **Choose ane if** you want zero-config LSP and a native CLI mode for agent integration.
+
+---
+
+## Emacs
+
+[gnu.org/software/emacs](https://www.gnu.org/software/emacs/)
+
+Emacs is a non-modal, Elisp-extensible editor that has been in development since 1976. It uses key-chord combinations (Ctrl/Meta + key sequences) for all commands and is famous for its extensibility -- often described as "an operating system that happens to edit text." Since Emacs 29, it includes Eglot (built-in LSP client) and tree-sitter support.
+
+**Where Emacs is stronger:**
+- Extensibility is unmatched. Every aspect of the editor is written in Elisp and can be redefined at runtime. Org-mode, Magit, TRAMP, and hundreds of other packages are entire applications.
+- Built-in LSP (Eglot) and tree-sitter since Emacs 29, comparable to Neovim.
+- Package ecosystem (MELPA, ELPA) covers virtually every use case.
+- Multi-decade stability and backwards compatibility.
+- Emacs can function as a mail client, terminal, project planner, and more.
+
+**Where ane differs:**
+- Emacs has a steep learning curve and significant configuration investment. ane is opinionated and requires no configuration.
+- Emacs is a large, multi-purpose platform. ane is a single-purpose code editor.
+- Emacs has no equivalent to ane's `exec` mode for headless one-shot edits with unified diff output.
+- ane's chord grammar (4-part composable commands) is a different paradigm from Emacs key-chords. Emacs key-chords are arbitrary bindings; ane chords are a structured grammar where each part has a fixed role.
+- ane ships as a single static binary. Emacs requires a full installation with Elisp runtime.
+
+**Choose Emacs if** you want an infinitely extensible environment where you control everything via Elisp. **Choose ane if** you want a lightweight, single-binary editor with structured chords and agent-native workflows.
+
+---
+
+## Helix
+
+[helix-editor.com](https://helix-editor.com)
+
+Helix is a modern terminal editor written in Rust with built-in LSP, tree-sitter, and a selection-first editing model inspired by Kakoune. It ships as a single binary with batteries included -- no plugins needed for core editing features.
+
+**Where Helix is stronger:**
+- Selection-first editing gives immediate visual feedback: you select text first, then apply an action. This makes it easier to verify what you're about to change.
+- Built-in tree-sitter provides fast, accurate syntax highlighting and structural navigation. ane does not yet have tree-sitter.
+- Built-in fuzzy file/symbol finder, surround manipulation, and multiple cursors -- all without plugins.
+- Larger community and more active development (Helix has significantly more contributors and users).
+- More mature TUI with features like split panes, picker menus, and inline diagnostics.
+
+**Where ane differs:**
+- Helix has no headless CLI mode. All editing is interactive. ane's `exec` mode enables one-shot edits from scripts and agents.
+- Helix has no plugin system (by design, though one is planned). ane also has no plugin system, but ane's `core` crate API lets you embed the chord engine programmatically.
+- Helix's selection-first model (select, then act) is the inverse of ane's chord model (declare the full operation as a structured 4-part command). Helix is more exploratory; ane is more declarative.
+- ane has explicit agent integration (`ane init <agent>`, skill files, tool definitions). Helix has no agent story.
+
+**Choose Helix if** you want a polished, batteries-included terminal editor with selection-first editing and no configuration. **Choose ane if** you need headless editing, agent integration, or prefer a declarative chord grammar over interactive selection.
+
+---
+
+## Kakoune
+
+[kakoune.org](https://kakoune.org)
+
+Kakoune is the editor that pioneered the selection-first model that Helix later adopted. It uses an object-verb grammar (select first, then act) with real-time visual feedback. Its client-server architecture allows multiple windows to edit the same session, and it extends through Unix shell commands rather than an embedded scripting language.
+
+**Where Kakoune is stronger:**
+- Selection-first with live visual feedback -- every action shows its effect before committing. This "no changes in the dark" philosophy reduces mistakes.
+- Unix-philosophy extensibility: pipe selections to shell commands (`|`), compose tools via shell scripts. No need to learn an editor-specific scripting language.
+- Client-server architecture enables multi-window editing and remote collaboration.
+- Highly composable: `%` (select all), `s` (regex select), `d` (delete) can be chained freely.
+
+**Where ane differs:**
+- Kakoune has no built-in LSP. Language-aware editing requires kak-lsp, an external tool. ane's LSP is built in.
+- Kakoune has no headless one-shot editing mode.
+- Kakoune's extension model (shell scripts) is powerful but requires Unix fluency. ane offers a crate API for Rust-based embedding.
+- ane's chords are a fixed grammar (4 parts, always). Kakoune's composability is more freeform -- more flexible but less predictable for automated use.
+- ane has explicit agent integration. Kakoune's shell-oriented design could be scripted for agents, but there's no built-in support.
+
+**Choose Kakoune if** you want selection-first editing with Unix-philosophy composability and multi-client sessions. **Choose ane if** you want built-in LSP and a structured command grammar that agents and scripts can generate reliably.
+
+---
+
+## nano
+
+[nano-editor.org](https://www.nano-editor.org)
+
+nano is a simple, modeless terminal editor. There is no learning curve -- you type and text appears. Available keyboard shortcuts are displayed at the bottom of the screen. It is the default editor on many Linux distributions and is the go-to choice for quick config file edits.
+
+**Where nano is stronger:**
+- Zero learning curve. No modes, no commands to memorize. Anyone can use it immediately.
+- Universally available on Linux/macOS systems.
+- Perfectly suited for quick edits to config files, commit messages, and small scripts.
+- Extremely stable and predictable.
+
+**Where ane differs:**
+- nano has no LSP support, no syntax-aware editing, and no plugin system.
+- nano has no composable editing commands -- it's direct text manipulation only.
+- nano has no headless mode or agent integration.
+- ane has a learning curve (the chord system). nano has effectively none.
+- ane is for sustained code editing sessions. nano is for quick edits.
+
+**Choose nano if** you need to make a quick edit and don't want to think about it. **Choose ane if** you want structured, language-aware editing for code.
+
+---
+
+## micro
+
+[micro-editor.github.io](https://micro-editor.github.io)
+
+micro is a modern terminal editor that aims to be easy to use while providing more power than nano. It uses familiar keybindings (Ctrl+S, Ctrl+C, Ctrl+V), has a Lua plugin system, full mouse support, multiple cursors, and a built-in terminal emulator. It ships as a single static binary (written in Go).
+
+**Where micro is stronger:**
+- Familiar keybindings that match GUI editors -- no learning curve for basic usage.
+- Full mouse support: click to position cursor, drag to select, scroll wheel.
+- Lua plugin system with an integrated package manager.
+- Built-in terminal emulator (split view) for running commands alongside editing.
+- Multiple cursors (Sublime Text-style).
+- Syntax highlighting for 75+ languages out of the box.
+
+**Where ane differs:**
+- micro has no built-in LSP support. Language-aware editing is limited to syntax highlighting and community plugins.
+- micro has no composable editing grammar. Editing is direct manipulation with standard keybindings plus multiple cursors.
+- micro has no headless mode or agent integration.
+- ane's chord system enables complex edits (e.g., "change the contents of function foo") as single commands. micro requires manual selection and editing for equivalent operations.
+- ane outputs unified diffs in exec mode, making it pipeline-friendly. micro is interactive-only.
+
+**Choose micro if** you want a modern, mouse-friendly terminal editor with GUI-like keybindings and a plugin system. **Choose ane if** you want chord-based editing, built-in LSP, and headless agent support.
+
+---
+
+## Summary
+
+| | Editing model | Built-in LSP | Headless/CLI mode | Plugin system | Agent integration | Learning curve |
+|---|---|---|---|---|---|---|
+| **Vim** | Modal (verb-object) | No | No | Vimscript | Via plugins | Steep |
+| **Neovim** | Modal (verb-object) | Yes | Limited | Lua/Vimscript | Via plugins/RPC | Steep |
+| **Emacs** | Key-chords | Yes (29+) | Limited | Elisp | Via Elisp | Steep |
+| **Helix** | Selection-first | Yes | No | None (planned) | No | Moderate |
+| **Kakoune** | Selection-first | No (kak-lsp) | No | Shell scripts | No | Moderate-steep |
+| **nano** | Modeless | No | No | None | No | Minimal |
+| **micro** | Modeless | No | No | Lua | No | Minimal |
+| **ane** | 4-part chords | Yes | Yes (`exec`) | None | Yes (core design) | Moderate |
+
+Every editor on this list is a good editor. The right choice depends on what you value: extensibility (Vim/Neovim/Emacs), visual feedback (Helix/Kakoune), simplicity (nano/micro), or structured language-aware commands with agent support (ane).
+
+---
+
+[<- Architecture Overview](07-architecture-overview.md)

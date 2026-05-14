@@ -141,23 +141,21 @@ YankEntireFunctionValue
 Parenthesized key-value pairs after the chord name:
 
 ```
-cifp(function:getData, value:"from: int, to: int")
-dufe(line:49)
+cifp(target:getData, value:"from: int, to: int")
+dufe(target:49)
 dols
 yefv
 ```
 
 **Argument keys** (recognized by resolver):
-- `function`: Function name (for Function scope)
-- `variable`: Variable name (for Variable scope)
-- `struct`: Struct name (for Struct scope)
-- `member`: Member name (for Member scope)
-- `line`: Line number (0-indexed, for Line scope)
+- `target`: Identify what to operate on — a symbol name for LSP scopes, or a zero-indexed line number for Line scope
+- `parent`: Disambiguate a member when the same name appears in multiple parents (Member scope)
+- `cursor`: Cursor position as `"line,col"` (zero-indexed)
 - `value`: Replacement text (for Change, Append, Prepend, Insert, Replace actions)
-- `search`, `replace`: Find/replace terms (for Replace action)
+- `find`, `replace`: Find/replace terms (for Replace action)
 
 **Argument values**:
-- Unquoted: treated as identifiers (e.g., `function:getData`)
+- Unquoted: treated as identifiers (e.g., `target:getData`)
 - Quoted with double quotes: treated as strings, escape sequences recognized (e.g., `value:"hello \"world\""`)
 
 #### Cursor Context
@@ -351,11 +349,11 @@ impl ChordEngine {
 **Algorithm**:
 
 ```
-Input: chord_string, e.g., "cifp(function:getData, value:\"int x\")"
+Input: chord_string, e.g., "cifp(target:getData, value:\"int x\")"
 
 1. Strip whitespace
 2. Detect parentheses: separate chord from args
-   - chord = "cifp", args = "function:getData, value:\"int x\""
+   - chord = "cifp", args = "target:getData, value:\"int x\""
 3. Detect form:
    - If len(chord) == 4 AND all chars match short form alphabet: SHORT FORM
    - Else: attempt LONG FORM (PascalCase decomposition)
@@ -1200,7 +1198,7 @@ mod parser_tests {
     
     #[test]
     fn test_arguments_parsing() {
-        let query = ChordEngine::parse("cifp(function:getData, value:\"x: int\")").unwrap();
+        let query = ChordEngine::parse("cifp(target:getData, value:\"x: int\")").unwrap();
         assert_eq!(query.args.target_name, Some("getData".to_string()));
         assert_eq!(query.args.value, Some("x: int".to_string()));
     }
@@ -1224,7 +1222,7 @@ mod resolver_tests {
     fn test_line_scope_explicit() {
         let mut lsp = MockLspEngine::new();
         let buffer = Buffer::from_str("line 0\nline 1\nline 2\n");
-        let query = ChordEngine::parse("dols(line:1)").unwrap();
+        let query = ChordEngine::parse("dols(target:1)").unwrap();
         
         let resolved = ChordEngine::resolve(&query, &[(buffer_path, &buffer)].into(), &mut lsp, None).unwrap();
         
@@ -1267,7 +1265,7 @@ mod resolver_tests {
         lsp.add_symbol(struct_symbol);
         
         let buffer = Buffer::from_str("struct MyStruct { field1: i32, field2: String }");
-        let query = ChordEngine::parse("cimn(member:field1)").unwrap();
+        let query = ChordEngine::parse("cimn(target:field1)").unwrap();
         
         let resolved = ChordEngine::resolve(&query, &buffers, &mut lsp, None).unwrap();
         // Should find field1 and target its name component
@@ -1356,7 +1354,7 @@ fn getData(x: i32, y: i32) -> String {
         let buffer = Buffer::from_str(source);
         let mut lsp = MockLspEngine::with_rust_source(source);
         
-        let chord = "cifp(function:getData, value:\"a: u64, b: u64\")";
+        let chord = "cifp(target:getData, value:\"a: u64, b: u64\")";
         
         let actions = ChordEngine::execute(chord, &buffers, &mut lsp, None).unwrap();
         let action = actions.get(buffer_path).unwrap();
@@ -1404,7 +1402,7 @@ fn main() {
         let mut lsp = MockLspEngine::new();
         // ... set up symbols
         
-        let actions = ChordEngine::execute("rifs(variable:oldName, value:newName)", &buffers, &mut lsp, None).unwrap();
+        let actions = ChordEngine::execute("rifs(target:oldName, value:newName)", &buffers, &mut lsp, None).unwrap();
         
         // Should produce actions for both files
         assert_eq!(actions.len(), 2);
@@ -1441,7 +1439,7 @@ fn main() {
 13. **Chord with no matching symbol**: Resolver → descriptive error ("Function 'foo' not found; available: bar, baz").
 14. **Buffer with syntax errors**: LSP may return partial/no symbols; resolver falls back to text matching for Line/Buffer scopes.
 15. **Cursor out of bounds**: Cursor position beyond EOF → error.
-16. **Target line out of bounds**: `dols(line:999)` on 50-line file → error.
+16. **Target line out of bounds**: `dols(target:999)` on 50-line file → error.
 
 ### Patcher Edge Cases
 
@@ -1520,7 +1518,7 @@ fn main() {
 
 ### Example 1: Change Function Parameters
 
-**Chord**: `cifp(function:getData, value:"a: u64, b: u64")`
+**Chord**: `cifp(target:getData, value:"a: u64, b: u64")`
 
 ```
 Before:
@@ -1559,7 +1557,7 @@ Diff:
 
 ### Example 3: Yank Function Body
 
-**Chord**: `yefv(function:getData)`
+**Chord**: `yefv(target:getData)`
 
 ```
 Yanked content:

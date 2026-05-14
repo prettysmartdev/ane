@@ -61,6 +61,139 @@ fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
     }
     idx
 }
+
+fn compute_text_width(state: &EditorState, term_width: u16) -> usize {
+    let total = state.current_buffer().map_or(1, |b| b.line_count());
+    let line_num_width = format!("{}", total.saturating_sub(1)).len();
+    let has_tree = state.file_tree.is_some() && state.focus_tree;
+    let editor_width = if has_tree {
+        (term_width as usize) / 2
+    } else {
+        term_width as usize
+    };
+    editor_width.saturating_sub(line_num_width + 1)
+}
+
+fn move_cursor_left(state: &mut EditorState) {
+    let at_start = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line))
+        .is_some_and(|line| state.cursor_col.min(line.len()) == 0);
+    if at_start && state.cursor_line > 0 {
+        state.cursor_line -= 1;
+        let end = state
+            .current_buffer()
+            .and_then(|b| b.lines.get(state.cursor_line))
+            .map_or(0, |l| l.len());
+        state.cursor_col = end;
+    } else if let Some(line) = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line))
+    {
+        state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
+    }
+}
+
+fn move_cursor_right(state: &mut EditorState) {
+    let (at_end, line_count) = {
+        let at_end = state
+            .current_buffer()
+            .and_then(|b| b.lines.get(state.cursor_line))
+            .map_or(true, |line| {
+                snap_to_char_boundary(line, state.cursor_col) >= line.len()
+            });
+        let count = state.current_buffer().map_or(0, |b| b.line_count());
+        (at_end, count)
+    };
+    if at_end && state.cursor_line + 1 < line_count {
+        state.cursor_line += 1;
+        state.cursor_col = 0;
+    } else if let Some(line) = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line))
+    {
+        state.cursor_col = next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
+    }
+}
+
+fn move_cursor_up(state: &mut EditorState, text_width: usize) {
+    let cur_info = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line))
+        .map(|line| {
+            let dc = editor_pane::display_col(line, state.cursor_col);
+            let offsets = editor_pane::wrap_offsets(line, text_width);
+            let (row, col_in_row) = editor_pane::display_col_to_wrap_pos(&offsets, dc);
+            (row, col_in_row, offsets)
+        });
+    if let Some((visual_row, col_in_row, offsets)) = cur_info {
+        if visual_row > 0 {
+            let target = editor_pane::wrap_row_start(&offsets, visual_row - 1) + col_in_row;
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                state.cursor_col = editor_pane::byte_col_from_display(line, target);
+            }
+        } else if state.cursor_line > 0 {
+            state.cursor_line -= 1;
+            if let Some(prev_line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                if text_width > 0 {
+                    let prev_offsets = editor_pane::wrap_offsets(prev_line, text_width);
+                    let last_row = prev_offsets.len() - 1;
+                    let target = editor_pane::wrap_row_start(&prev_offsets, last_row) + col_in_row;
+                    state.cursor_col = editor_pane::byte_col_from_display(prev_line, target);
+                } else {
+                    state.cursor_col = state.cursor_col.min(prev_line.len());
+                }
+            }
+        }
+    }
+}
+
+fn move_cursor_down(state: &mut EditorState, text_width: usize) {
+    let cur_info = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line))
+        .map(|line| {
+            let dc = editor_pane::display_col(line, state.cursor_col);
+            let offsets = editor_pane::wrap_offsets(line, text_width);
+            let (visual_row, col_in_row) = editor_pane::display_col_to_wrap_pos(&offsets, dc);
+            let total_rows = offsets.len();
+            (visual_row, col_in_row, total_rows, offsets)
+        });
+    let has_next = state
+        .current_buffer()
+        .and_then(|b| b.lines.get(state.cursor_line + 1))
+        .is_some();
+    if let Some((visual_row, col_in_row, total_rows, offsets)) = cur_info {
+        if total_rows > 1 && visual_row < total_rows - 1 {
+            let target = editor_pane::wrap_row_start(&offsets, visual_row + 1) + col_in_row;
+            if let Some(line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                state.cursor_col = editor_pane::byte_col_from_display(line, target);
+            }
+        } else if has_next {
+            state.cursor_line += 1;
+            if let Some(next_line) = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+            {
+                if text_width > 0 {
+                    state.cursor_col = editor_pane::byte_col_from_display(next_line, col_in_row);
+                } else {
+                    state.cursor_col = state.cursor_col.min(next_line.len());
+                }
+            }
+        }
+    }
+}
+
 use super::tui_frontend::TuiFrontend;
 
 use crate::frontend::traits::ApplyChordAction;
@@ -255,6 +388,7 @@ fn event_loop(
                     key.modifiers,
                     token_tx,
                     lsp_status,
+                    term_size.width,
                 );
                 if buffer_modified {
                     last_edit = Some(Instant::now());
@@ -280,7 +414,7 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
         return;
     }
 
-    let line_num_width = format!("{}", total).len();
+    let line_num_width = format!("{}", total.saturating_sub(1)).len();
     let has_tree = state.file_tree.is_some() && state.focus_tree;
     let editor_width = if has_tree {
         (term_width as usize) / 2
@@ -305,7 +439,9 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
                 .unwrap_or("");
             if i == cursor {
                 let cursor_display_col = editor_pane::display_col(line, state.cursor_col);
-                let cursor_row_in_line = cursor_display_col.checked_div(text_width).unwrap_or(0);
+                let offsets = editor_pane::wrap_offsets(line, text_width);
+                let (cursor_row_in_line, _) =
+                    editor_pane::display_col_to_wrap_pos(&offsets, cursor_display_col);
                 visual_rows += cursor_row_in_line + 1;
             } else {
                 visual_rows += editor_pane::visual_row_count(line, text_width);
@@ -400,6 +536,7 @@ fn draw(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_key(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
@@ -408,6 +545,7 @@ fn handle_key(
     modifiers: KeyModifiers,
     token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
     lsp_status: ServerState,
+    term_width: u16,
 ) -> bool {
     // Priority 1: Exit modal
     if state.show_exit_modal {
@@ -445,12 +583,12 @@ fn handle_key(
     // Priority 5: Chord mode
     if state.mode == Mode::Chord {
         return handle_chord_mode(
-            state, frontend, engine, code, modifiers, token_tx, lsp_status,
+            state, frontend, engine, code, modifiers, token_tx, lsp_status, term_width,
         );
     }
 
     // Priority 6: Edit mode
-    handle_edit_mode(state, code, modifiers)
+    handle_edit_mode(state, code, modifiers, term_width)
 }
 
 fn handle_exit_modal(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
@@ -578,6 +716,7 @@ fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_chord_mode(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
@@ -586,6 +725,7 @@ fn handle_chord_mode(
     modifiers: KeyModifiers,
     token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
     lsp_status: ServerState,
+    term_width: u16,
 ) -> bool {
     match code {
         KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -609,40 +749,18 @@ fn handle_chord_mode(
             state.chord_error = false;
         }
         KeyCode::Up if state.chord_input.is_empty() => {
-            state.cursor_line = state.cursor_line.saturating_sub(1);
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col = state.cursor_col.min(line.len());
-            }
+            let tw = compute_text_width(state, term_width);
+            move_cursor_up(state, tw);
         }
         KeyCode::Down if state.chord_input.is_empty() => {
-            let next_len = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line + 1))
-                .map(|l| l.len());
-            if let Some(len) = next_len {
-                state.cursor_line += 1;
-                state.cursor_col = state.cursor_col.min(len);
-            }
+            let tw = compute_text_width(state, term_width);
+            move_cursor_down(state, tw);
         }
         KeyCode::Left if state.chord_input.is_empty() => {
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
-            }
+            move_cursor_left(state);
         }
         KeyCode::Right if state.chord_input.is_empty() => {
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col =
-                    next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
-            }
+            move_cursor_right(state);
         }
         KeyCode::Left => {
             state.chord_cursor_col = state.chord_cursor_col.saturating_sub(1);
@@ -764,7 +882,12 @@ fn clear_chord(state: &mut EditorState) {
     state.chord_history_index = None;
 }
 
-fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) -> bool {
+fn handle_edit_mode(
+    state: &mut EditorState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    term_width: u16,
+) -> bool {
     let mut modified = false;
     match code {
         KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -794,40 +917,18 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             }
         }
         KeyCode::Up => {
-            state.cursor_line = state.cursor_line.saturating_sub(1);
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col = state.cursor_col.min(line.len());
-            }
+            let tw = compute_text_width(state, term_width);
+            move_cursor_up(state, tw);
         }
         KeyCode::Down => {
-            let next_len = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line + 1))
-                .map(|l| l.len());
-            if let Some(len) = next_len {
-                state.cursor_line += 1;
-                state.cursor_col = state.cursor_col.min(len);
-            }
+            let tw = compute_text_width(state, term_width);
+            move_cursor_down(state, tw);
         }
         KeyCode::Left => {
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
-            }
+            move_cursor_left(state);
         }
         KeyCode::Right => {
-            if let Some(line) = state
-                .current_buffer()
-                .and_then(|b| b.lines.get(state.cursor_line))
-            {
-                state.cursor_col =
-                    next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
-            }
+            move_cursor_right(state);
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
             let line = state.cursor_line;

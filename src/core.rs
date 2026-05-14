@@ -29,16 +29,16 @@ Positional: i=Inside e=Entire a=After b=Before n=Next p=Previous u=Until o=Outsi
 Scope:      l=Line b=Buffer f=Function v=Variable s=Struct m=Member\n\
 Component:  b=Beginning c=Contents e=End v=Value p=Parameters n=Name s=Self\n\
 \n\
-Args in parens: chord(target:fn_name, line:N)\n\
+Args in parens: chord(target:name_or_line_number)\n\
 Use the value parameter (not inline) for replacement text.\n\
 \n\
 Examples:\n\
-  cels(line:3) + value -> change line 3\n\
-  dels(line:5) -> delete line 5\n\
-  cifn(function:getData) + value -> rename function\n\
-  aale(line:10) + value -> append after line 10\n\
-  yefc(function:main) -> yank function body\n\
-  rifc(function:handler) + value -> replace function contents";
+  cels(target:3) + value -> change line 3\n\
+  dels(target:5) -> delete line 5\n\
+  cifn(target:getData) + value -> rename function\n\
+  aale(target:10) + value -> append after line 10\n\
+  yefc(target:main) -> yank function body\n\
+  rifc(target:handler) + value -> replace function contents";
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
@@ -53,7 +53,7 @@ pub fn tool_definition() -> ToolDefinition {
                 },
                 "chord": {
                     "type": "string",
-                    "description": "Chord expression, e.g. \"cels(line:3)\" or \"cifn(function:getData)\""
+                    "description": "Chord expression, e.g. \"cels(target:3)\" or \"cifn(target:getData)\""
                 },
                 "value": {
                     "type": "string",

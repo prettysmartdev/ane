@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn parse_with_args() {
-        let parsed = parse_chord("cifp(function:getData, value:\"(x: i32)\")").unwrap();
+        let parsed = parse_chord("cifp(target:getData, value:\"(x: i32)\")").unwrap();
         assert_eq!(parsed.action, Action::Change);
         assert_eq!(parsed.scope, Scope::Function);
         assert_eq!(parsed.component, Component::Parameters);

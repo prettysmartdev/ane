@@ -23,11 +23,11 @@ Use `ane exec <file> --chord "<chord>"` for precise, non-interactive edits. Exit
 
 ## Arguments
 
-`chord(target:name, value:"text", line:N, cursor:L:C, find:"pat", replace:"rep")`
+`chord(target:name_or_line, value:"text", cursor:L:C, find:"pat", replace:"rep")`
 
 Include only what's needed. Use `-` as value to read from stdin:
 ```
-echo "new body" | ane exec file.rs --chord "cifc(function:main, value:-)"
+echo "new body" | ane exec file.rs --chord "cifc(target:main, value:-)"
 ```
 
 ## LSP scopes
@@ -37,15 +37,15 @@ Function, Variable, Struct, Member require LSP. Line, Buffer, Delimiter do not.
 ## Examples
 
 ```
-ane exec f.rs --chord "cels(line:3, value:\"new text\")"       # change line 3
-ane exec f.rs --chord "dels(line:5)"                            # delete line 5
-echo "x + 1" | ane exec f.rs --chord "civv(variable:count, value:-)"  # change variable value
-ane exec f.rs --chord "cifn(function:getData, value:\"fetch\")" # rename function
-ane exec f.rs --chord "aals(line:10, value:\"new line\")"       # append after line 10
-ane exec f.rs --chord "yefc(function:main)"                     # yank function body (stdout)
+ane exec f.rs --chord "cels(target:3, value:\"new text\")"       # change line 3
+ane exec f.rs --chord "dels(target:5)"                            # delete line 5
+echo "x + 1" | ane exec f.rs --chord "civv(target:count, value:-)"    # change variable value
+ane exec f.rs --chord "cifn(target:getData, value:\"fetch\")"   # rename function
+ane exec f.rs --chord "aals(target:10, value:\"new line\")"       # append after line 10
+ane exec f.rs --chord "yefc(target:main)"                       # yank function body (stdout)
 ```
 
 ## Notes
 
-- Provide `line:N` for Line scope, `function:name`/`variable:name` for LSP scopes.
+- Use `target:` for all scopes — a line number for Line scope, a symbol name for LSP scopes.
 - Pipe stdin with `value:-` for multiline replacement text.

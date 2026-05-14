@@ -25,7 +25,7 @@ Edit function signatures with a single chord instead of manual navigation and se
 As a: Code Agent
 
 I want to:
-Run `ane exec --chord 'rifv(function:getData, value:"(x: i32) -> String")' src/main.rs` and receive a unified diff on stdout showing the function's return value was replaced
+Run `ane exec --chord 'rifv(target:getData, value:"(x: i32) -> String")' src/main.rs` and receive a unified diff on stdout showing the function's return value was replaced
 
 So I can:
 Make precise, semantic code edits with minimal tokens and without parsing the file myself

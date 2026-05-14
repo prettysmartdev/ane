@@ -107,7 +107,7 @@ fn resolve_line_scope(query: &ChordQuery, buffer: &Buffer, buffer_name: &str) ->
         None => {
             return Err(ChordError::resolve(
                 buffer_name,
-                "line scope requires either 'line:' arg or a cursor position",
+                "line scope requires either 'target:' arg or a cursor position",
             )
             .into());
         }

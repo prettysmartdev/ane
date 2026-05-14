@@ -69,14 +69,12 @@ fn parse_args(raw_args: &Option<&str>) -> ChordArgs {
             let key = key.trim();
             let val = val.trim().trim_matches('"');
             match key {
-                "function" | "variable" | "struct" | "member" | "name" => {
+                "target" if !val.is_empty() => {
                     args.target_name = Some(val.to_string());
+                    args.target_line = val.parse().ok();
                 }
                 "parent" => {
                     args.parent_name = Some(val.to_string());
-                }
-                "line" => {
-                    args.target_line = val.parse().ok();
                 }
                 "cursor" => {
                     if let Some((l, c)) = val.split_once(',') {
@@ -611,8 +609,8 @@ mod tests {
     }
 
     #[test]
-    fn args_function_key() {
-        let q = parse("cifc(function:getData)").unwrap();
+    fn args_target_key() {
+        let q = parse("cifc(target:getData)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert!(q.args.target_line.is_none());
         assert!(q.args.cursor_pos.is_none());
@@ -620,34 +618,36 @@ mod tests {
     }
 
     #[test]
-    fn args_variable_key_alias() {
-        let q = parse("cevv(variable:myVar)").unwrap();
+    fn args_target_key_works_for_all_lsp_scopes() {
+        let q = parse("cevv(target:myVar)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("myVar"));
-    }
-
-    #[test]
-    fn args_struct_key_alias() {
-        let q = parse("cesn(struct:MyStruct)").unwrap();
+        let q = parse("cesn(target:MyStruct)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("MyStruct"));
-    }
-
-    #[test]
-    fn args_member_key_alias() {
-        let q = parse("cemn(member:myField)").unwrap();
+        let q = parse("cemn(target:myField)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("myField"));
     }
 
     #[test]
-    fn args_name_key_alias() {
+    fn args_old_scope_specific_keys_are_ignored() {
+        let q = parse("cifc(function:getData)").unwrap();
+        assert!(q.args.target_name.is_none());
+        let q = parse("cevv(variable:myVar)").unwrap();
+        assert!(q.args.target_name.is_none());
+        let q = parse("cesn(struct:MyStruct)").unwrap();
+        assert!(q.args.target_name.is_none());
+        let q = parse("cemn(member:myField)").unwrap();
+        assert!(q.args.target_name.is_none());
         let q = parse("cifc(name:myFunc)").unwrap();
-        assert_eq!(q.args.target_name.as_deref(), Some("myFunc"));
+        assert!(q.args.target_name.is_none());
+        let q = parse("cels(line:42)").unwrap();
+        assert!(q.args.target_line.is_none());
     }
 
     #[test]
-    fn args_line_number() {
-        let q = parse("cels(line:42)").unwrap();
+    fn args_target_line_number() {
+        let q = parse("cels(target:42)").unwrap();
         assert_eq!(q.args.target_line, Some(42));
-        assert!(q.args.target_name.is_none());
+        assert_eq!(q.args.target_name.as_deref(), Some("42"));
     }
 
     #[test]
@@ -670,41 +670,41 @@ mod tests {
 
     #[test]
     fn args_value_quoted_with_spaces() {
-        let q = parse(r#"cifc(function:getData, value:"new body goes here")"#).unwrap();
+        let q = parse(r#"cifc(target:getData, value:"new body goes here")"#).unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert_eq!(q.args.value.as_deref(), Some("new body goes here"));
     }
 
     #[test]
     fn args_value_with_parens_quoted() {
-        let q = parse(r#"cifp(function:getData, value:"(x: i32)")"#).unwrap();
+        let q = parse(r#"cifp(target:getData, value:"(x: i32)")"#).unwrap();
         assert_eq!(q.args.value.as_deref(), Some("(x: i32)"));
     }
 
     #[test]
     fn args_extra_commas_ignored() {
-        let q = parse("cels(,line:1,,)").unwrap();
+        let q = parse("cels(,target:1,,)").unwrap();
         assert_eq!(q.args.target_line, Some(1));
     }
 
     #[test]
-    fn args_missing_value_for_line_is_none() {
-        let q = parse("cels(line:)").unwrap();
+    fn args_missing_value_for_target_is_none() {
+        let q = parse("cels(target:)").unwrap();
         assert!(q.args.target_line.is_none());
+        assert!(q.args.target_name.is_none());
     }
 
     #[test]
     fn args_unknown_key_is_ignored() {
-        let q = parse("cels(bogus:foo, line:2)").unwrap();
+        let q = parse("cels(bogus:foo, target:2)").unwrap();
         assert_eq!(q.args.target_line, Some(2));
     }
 
     #[test]
     fn args_multiple_keys() {
-        let q = parse(r#"cifc(function:getData, value:"body", line:5)"#).unwrap();
+        let q = parse(r#"cifc(target:getData, value:"body")"#).unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("getData"));
         assert_eq!(q.args.value.as_deref(), Some("body"));
-        assert_eq!(q.args.target_line, Some(5));
     }
 
     #[test]
@@ -810,21 +810,21 @@ mod tests {
 
     #[test]
     fn unterminated_paren_errors() {
-        let result = parse("cifv(line:1");
+        let result = parse("cifv(target:1");
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("unterminated"));
     }
 
     #[test]
     fn args_parent_key() {
-        let q = parse("cemv(member:x, parent:Foo)").unwrap();
+        let q = parse("cemv(target:x, parent:Foo)").unwrap();
         assert_eq!(q.args.target_name.as_deref(), Some("x"));
         assert_eq!(q.args.parent_name.as_deref(), Some("Foo"));
     }
 
     #[test]
     fn args_find_replace_keys() {
-        let q = parse(r#"rels(line:0, find:"foo", replace:"bar")"#).unwrap();
+        let q = parse(r#"rels(target:0, find:"foo", replace:"bar")"#).unwrap();
         assert_eq!(q.args.find.as_deref(), Some("foo"));
         assert_eq!(q.args.replace.as_deref(), Some("bar"));
     }

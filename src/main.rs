@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use anyhow::Result;
 
 use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
@@ -57,7 +59,11 @@ fn run_exec(chord_str: &str, path: &std::path::Path) -> Result<()> {
         println!("{yanked}");
     } else {
         let path_str = path.display().to_string();
-        let diff_output = diff::unified_diff(&path_str, &result.original, &result.modified);
+        let diff_output = if std::io::stdout().is_terminal() {
+            diff::colored_unified_diff(&path_str, &result.original, &result.modified)
+        } else {
+            diff::unified_diff(&path_str, &result.original, &result.modified)
+        };
         if !diff_output.is_empty() {
             print!("{diff_output}");
         }

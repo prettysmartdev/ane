@@ -73,8 +73,8 @@ The engine is designed so that **no individual chord combination has its own fun
 - Example: `AppendAfterLineEnd`
 
 **Arguments**: Passed as parenthesized key-value pairs after the chord name.
-- `cifp(function:getData, value:"from: int, to: int")`
-- `dufe(line:49)`
+- `cifp(target:getData, value:"from: int, to: int")`
+- `dufe(target:49)`
 - `dols` (no arguments — operates on cursor context)
 - `jnfv` (no arguments - operates on cursor itself)
 
@@ -89,7 +89,7 @@ The engine is designed so that **no individual chord combination has its own fun
 | `aale` | Append content after the end of the current line |
 | `cblb` | Change from before the beginning of the line (prepend-replace from buffer start to line start) |
 | `dols` | Delete everything outside the current line's self (delete all other lines) |
-| `cifp(function:getData, value:"(x: i32, y: i32)")` | Change inside function parameters for getData |
+| `cifp(target:getData, value:"(x: i32, y: i32)")` | Change inside function parameters for getData |
 | `ribs` | Replace inside the buffer self (find-and-replace in entire file) |
 | `cisv` | Change inside struct value (edit the body of a struct definition) |
 | `dimn` | Delete inside member name (delete a field or variant's identifier) |

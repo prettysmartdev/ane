@@ -38,7 +38,7 @@ fn run(chord: &str, path: &str, content: &str) -> ChordAction {
 #[test]
 fn full_pipeline_change_entire_line_with_value() {
     let action = run(
-        r#"cels(line:1, value:"replacement line")"#,
+        r#"cels(target:1, value:"replacement line")"#,
         "/buf",
         "first line\nsecond line\nthird line",
     );
@@ -55,7 +55,7 @@ fn full_pipeline_change_entire_line_with_value() {
 
 #[test]
 fn full_pipeline_delete_entire_line() {
-    let action = run("dels(line:1)", "/buf", "aaa\nbbb\nccc");
+    let action = run("dels(target:1)", "/buf", "aaa\nbbb\nccc");
     let diff = action.diff.as_ref().unwrap();
     assert!(!diff.modified.contains("bbb"));
     assert!(diff.modified.contains("aaa"));
@@ -64,7 +64,7 @@ fn full_pipeline_delete_entire_line() {
 
 #[test]
 fn full_pipeline_yank_line_captures_content() {
-    let action = run("yels(line:0)", "/buf", "yanked content\nother line");
+    let action = run("yels(target:0)", "/buf", "yanked content\nother line");
     assert!(action.diff.is_none());
     assert_eq!(action.yanked_content.as_deref(), Some("yanked content"));
 }
@@ -72,7 +72,7 @@ fn full_pipeline_yank_line_captures_content() {
 #[test]
 fn full_pipeline_append_after_line_end() {
     let action = run(
-        r#"aale(line:0, value:" appended")"#,
+        r#"aale(target:0, value:" appended")"#,
         "/buf",
         "hello world\nline two",
     );
@@ -87,7 +87,7 @@ fn full_pipeline_append_after_line_end() {
 #[test]
 fn full_pipeline_prepend_before_line_beginning() {
     let action = run(
-        r#"pels(line:0, value:">>> ")"#,
+        r#"pels(target:0, value:">>> ")"#,
         "/buf",
         "original text\nline two",
     );
@@ -116,7 +116,7 @@ fn full_pipeline_change_entire_buffer_self() {
 #[test]
 fn round_trip_change_line_matches_expected() {
     let original = "line one\nline two\nline three";
-    let action = run(r#"cels(line:1, value:"line REPLACED")"#, "/buf", original);
+    let action = run(r#"cels(target:1, value:"line REPLACED")"#, "/buf", original);
     let diff = action.diff.as_ref().unwrap();
     let result = &diff.modified;
 
@@ -130,7 +130,7 @@ fn round_trip_change_line_matches_expected() {
 fn round_trip_delete_clears_line_content() {
     // dels clears the line's content (sets it to "") rather than removing the line entirely
     let original = "a\nb\nc\nd\ne";
-    let action = run("dels(line:2)", "/buf", original);
+    let action = run("dels(target:2)", "/buf", original);
     let diff = action.diff.as_ref().unwrap();
     let result_lines: Vec<&str> = diff.modified.lines().collect();
     assert!(
@@ -145,7 +145,7 @@ fn round_trip_delete_clears_line_content() {
 #[test]
 fn round_trip_append_increases_line_length() {
     let original = "hello";
-    let action = run(r#"aale(line:0, value:" world")"#, "/buf", original);
+    let action = run(r#"aale(target:0, value:" world")"#, "/buf", original);
     let diff = action.diff.as_ref().unwrap();
     assert_eq!(diff.modified.trim(), "hello world");
 }
@@ -172,7 +172,7 @@ fn main() {
 
 #[test]
 fn real_rust_source_delete_line() {
-    let action = run("dels(line:7)", "/src/main.rs", RUST_SOURCE);
+    let action = run("dels(target:7)", "/src/main.rs", RUST_SOURCE);
     let diff = action.diff.as_ref().unwrap();
     assert!(
         !diff.modified.contains("let dy ="),
@@ -185,7 +185,7 @@ fn real_rust_source_delete_line() {
 #[test]
 fn real_rust_source_change_line_with_value() {
     let action = run(
-        r#"cels(line:12, value:"    let p1 = Point { x: 1.0, y: 2.0 };")"#,
+        r#"cels(target:12, value:"    let p1 = Point { x: 1.0, y: 2.0 };")"#,
         "/src/main.rs",
         RUST_SOURCE,
     );
@@ -204,7 +204,7 @@ fn real_rust_source_change_line_with_value() {
 
 #[test]
 fn real_rust_source_yank_function_line() {
-    let action = run("yels(line:5)", "/src/main.rs", RUST_SOURCE);
+    let action = run("yels(target:5)", "/src/main.rs", RUST_SOURCE);
     assert!(action.diff.is_none());
     let yanked = action.yanked_content.as_ref().unwrap();
     assert!(yanked.contains("fn distance"), "yanked: {yanked}");
@@ -213,7 +213,7 @@ fn real_rust_source_yank_function_line() {
 #[test]
 fn real_rust_source_diff_hunks_nonempty_on_change() {
     let action = run(
-        r#"cels(line:0, value:"struct Vector {")"#,
+        r#"cels(target:0, value:"struct Vector {")"#,
         "/src/main.rs",
         RUST_SOURCE,
     );
@@ -241,7 +241,7 @@ fn multi_buffer_same_chord_applied_to_each() {
     buffers.insert(path_b.to_string(), make_buffer(path_b, content_b));
 
     let mut lsp = default_lsp();
-    let mut actions = ChordEngine::execute("dels(line:0)", &buffers, &mut lsp).unwrap();
+    let mut actions = ChordEngine::execute("dels(target:0)", &buffers, &mut lsp).unwrap();
 
     let action_a = actions.remove(path_a).unwrap();
     let action_b = actions.remove(path_b).unwrap();
@@ -373,7 +373,7 @@ fn fn_sym(
 #[test]
 fn cifn_renames_function() {
     let action = run_with_lsp(
-        r#"cifn(function:foo, value:"bar")"#,
+        r#"cifn(target:foo, value:"bar")"#,
         "/test.rs",
         "fn foo() { 42 }",
         vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
@@ -389,7 +389,7 @@ fn cifn_renames_function() {
 #[test]
 fn cifc_replaces_function_contents() {
     let action = run_with_lsp(
-        r#"cifc(function:foo, value:" 99 ")"#,
+        r#"cifc(target:foo, value:" 99 ")"#,
         "/test.rs",
         "fn foo() { 42 }",
         vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
@@ -405,7 +405,7 @@ fn cifc_replaces_function_contents() {
 #[test]
 fn cifc_long_form_replaces_function_contents() {
     let action = run_with_lsp(
-        r#"ChangeInsideFunctionContents(function:foo, value:" 99 ")"#,
+        r#"ChangeInsideFunctionContents(target:foo, value:" 99 ")"#,
         "/test.rs",
         "fn foo() { 42 }",
         vec![fn_sym("foo", 0, 0, 0, 15, 0, 3, 0, 6)],
@@ -421,7 +421,7 @@ fn cifc_long_form_replaces_function_contents() {
 #[test]
 fn cbfs_replaces_text_before_function() {
     let action = run_with_lsp(
-        r#"cbfs(function:foo, value:"// header ")"#,
+        r#"cbfs(target:foo, value:"// header ")"#,
         "/test.rs",
         "use std::io;\n\nfn foo() { 42 }",
         vec![fn_sym("foo", 2, 0, 2, 15, 2, 3, 2, 6)],

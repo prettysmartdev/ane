@@ -2,9 +2,10 @@
 
 Every valid scope/component combination with worked before/after examples.
 
-Chords have four parts: `<action><positional><scope><component>`. Each example
-shows the short form, long form (with parameter names in parentheses), and a
-code snippet demonstrating the effect.
+Chords have four parts: `<action><positional><scope><component>`. See
+[Chord System](01-chord-system.md) for the full grammar reference. Each example
+below shows the short form, long form (with parameter names in parentheses),
+and a code snippet demonstrating the effect.
 
 ---
 
@@ -17,8 +18,8 @@ Line scope targets a single line by number or cursor position. No LSP required.
 The entire line.
 
 ```
-cels(line:1, value:"let y = 20;")
-ChangeEntireLineSelf(line:1, value:"let y = 20;")
+cels(target:1, value:"let y = 20;")
+ChangeEntireLineSelf(target:1, value:"let y = 20;")
 ```
 
 ```rust
@@ -33,8 +34,8 @@ let z = 30;                       let z = 30;
 Zero-width point at the start of the line.
 
 ```
-aelb(line:0, value:"// ")
-AppendEntireLineBeginning(line:0, value:"// ")
+aelb(target:0, value:"// ")
+AppendEntireLineBeginning(target:0, value:"// ")
 ```
 
 ```rust
@@ -47,8 +48,8 @@ let x = 10;                       // let x = 10;
 Zero-width point at the end of the line.
 
 ```
-aele(line:0, value:" // TODO")
-AppendEntireLineEnd(line:0, value:" // TODO")
+aele(target:0, value:" // TODO")
+AppendEntireLineEnd(target:0, value:" // TODO")
 ```
 
 ```rust
@@ -62,8 +63,8 @@ For Line scope, Name returns a point at the start of the line (same as
 Beginning). Primarily useful with Next/Previous positionals.
 
 ```
-dals(line:2)
-DeleteEntireLineSelf(line:2)
+dals(target:2)
+DeleteEntireLineSelf(target:2)
 ```
 
 ```rust
@@ -139,8 +140,8 @@ Function scope targets a function or method by name or cursor position. Requires
 The entire function definition.
 
 ```
-cefs(function:greet, value:"fn greet() { println!(\"hey\"); }")
-ChangeEntireFunctionSelf(function:greet, value:"fn greet() { println!(\"hey\"); }")
+cefs(target:greet, value:"fn greet() { println!(\"hey\"); }")
+ChangeEntireFunctionSelf(target:greet, value:"fn greet() { println!(\"hey\"); }")
 ```
 
 ```rust
@@ -155,8 +156,8 @@ fn greet(name: &str) {             fn greet() { println!("hey"); }
 The function's identifier (name only, via LSP selectionRange).
 
 ```
-cifn(function:process, value:"handle")
-ChangeInsideFunctionName(function:process, value:"handle")
+cifn(target:process, value:"handle")
+ChangeInsideFunctionName(target:process, value:"handle")
 ```
 
 ```rust
@@ -171,8 +172,8 @@ fn process(data: &[u8]) {          fn handle(data: &[u8]) {
 The brace-delimited body `{ ... }`.
 
 ```
-cifc(function:init, value:"\n    todo!()\n")
-ChangeInsideFunctionContents(function:init, value:"\n    todo!()\n")
+cifc(target:init, value:"\n    todo!()\n")
+ChangeInsideFunctionContents(target:init, value:"\n    todo!()\n")
 ```
 
 ```rust
@@ -188,8 +189,8 @@ fn init() {                        fn init() {
 Zero-width point at the end of the function.
 
 ```
-aefe(function:main, value:"\n\nfn helper() {}")
-AppendEntireFunctionEnd(function:main, value:"\n\nfn helper() {}")
+aefe(target:main, value:"\n\nfn helper() {}")
+AppendEntireFunctionEnd(target:main, value:"\n\nfn helper() {}")
 ```
 
 ```rust
@@ -206,8 +207,8 @@ fn main() {                        fn main() {
 The parenthesized parameter list `(...)`.
 
 ```
-cifp(function:add, value:"a: i32, b: i32")
-ChangeInsideFunctionParameters(function:add, value:"a: i32, b: i32")
+cifp(target:add, value:"a: i32, b: i32")
+ChangeInsideFunctionParameters(target:add, value:"a: i32, b: i32")
 ```
 
 ```rust
@@ -223,8 +224,8 @@ The parenthesized argument list at a **call site** of the named function,
 searched outside the function's own definition.
 
 ```
-cifa(function:process, value:"new_data, true")
-ChangeInsideFunctionArguments(function:process, value:"new_data, true")
+cifa(target:process, value:"new_data, true")
+ChangeInsideFunctionArguments(target:process, value:"new_data, true")
 ```
 
 ```rust
@@ -249,8 +250,8 @@ or value) and the scope resolves to the full statement.
 The entire variable declaration.
 
 ```
-devs(variable:temp)
-DeleteEntireVariableSelf(variable:temp)
+devs(target:temp)
+DeleteEntireVariableSelf(target:temp)
 ```
 
 ```rust
@@ -267,8 +268,8 @@ cursor is on the value side, the name is correctly identified via LSP
 documentSymbol or text-based fallback.
 
 ```
-cevn(variable:old_name, value:"new_name")
-ChangeEntireVariableName(variable:old_name, value:"new_name")
+cevn(target:old_name, value:"new_name")
+ChangeEntireVariableName(target:old_name, value:"new_name")
 ```
 
 ```rust
@@ -281,8 +282,8 @@ let old_name = compute();          let new_name = compute();
 The right-hand side of the `=` assignment.
 
 ```
-cevv(variable:config, value:"Config::default()")
-ChangeEntireVariableValue(variable:config, value:"Config::default()")
+cevv(target:config, value:"Config::default()")
+ChangeEntireVariableValue(target:config, value:"Config::default()")
 ```
 
 ```rust
@@ -295,8 +296,8 @@ let config = load_from_file();     let config = Config::default();
 Zero-width point at the end of the variable declaration.
 
 ```
-aeve(variable:items, value:"\nlet count = items.len();")
-AppendEntireVariableEnd(variable:items, value:"\nlet count = items.len();")
+aeve(target:items, value:"\nlet count = items.len();")
+AppendEntireVariableEnd(target:items, value:"\nlet count = items.len();")
 ```
 
 ```rust
@@ -316,8 +317,8 @@ Struct scope targets a struct or enum definition. Requires LSP.
 The entire struct/enum definition.
 
 ```
-yess(struct:Config)
-YankEntireStructSelf(struct:Config)
+yess(target:Config)
+YankEntireStructSelf(target:Config)
 ```
 
 Copies the full `struct Config { ... }` definition. No modification.
@@ -327,8 +328,8 @@ Copies the full `struct Config { ... }` definition. No modification.
 The struct's identifier.
 
 ```
-cesn(struct:OldName, value:"NewName")
-ChangeEntireStructName(struct:OldName, value:"NewName")
+cesn(target:OldName, value:"NewName")
+ChangeEntireStructName(target:OldName, value:"NewName")
 ```
 
 ```rust
@@ -343,8 +344,8 @@ struct OldName {                   struct NewName {
 The brace-delimited body `{ ... }`.
 
 ```
-cisc(struct:Point, value:"\n    x: f64,\n    y: f64,\n    z: f64,\n")
-ChangeInsideStructContents(struct:Point, value:"\n    x: f64,\n    y: f64,\n    z: f64,\n")
+cisc(target:Point, value:"\n    x: f64,\n    y: f64,\n    z: f64,\n")
+ChangeInsideStructContents(target:Point, value:"\n    x: f64,\n    y: f64,\n    z: f64,\n")
 ```
 
 ```rust
@@ -361,8 +362,8 @@ struct Point {                     struct Point {
 Zero-width point at the end of the struct definition.
 
 ```
-aese(struct:Color, value:"\n\nimpl Color {\n    fn new() -> Self { todo!() }\n}")
-AppendEntireStructEnd(struct:Color, value:"\n\nimpl Color {\n    fn new() -> Self { todo!() }\n}")
+aese(target:Color, value:"\n\nimpl Color {\n    fn new() -> Self { todo!() }\n}")
+AppendEntireStructEnd(target:Color, value:"\n\nimpl Color {\n    fn new() -> Self { todo!() }\n}")
 ```
 
 ```rust
@@ -381,16 +382,16 @@ struct Color {                     struct Color {
 ## Member scope (`m`)
 
 Member scope targets a struct field or enum variant. Requires LSP. Use
-`parent:<name>` to disambiguate when multiple structs define the same
-field name.
+`parent:<name>` to disambiguate when the same field name appears in
+multiple structs.
 
 ### Member + Self (`ms`)
 
 The entire field or variant declaration.
 
 ```
-dems(member:deprecated_field, parent:Config)
-DeleteEntireMemberSelf(member:deprecated_field, parent:Config)
+dems(target:deprecated_field, parent:Config)
+DeleteEntireMemberSelf(target:deprecated_field, parent:Config)
 ```
 
 ```rust
@@ -406,8 +407,8 @@ struct Config {                    struct Config {
 The field or variant identifier.
 
 ```
-cemn(member:x, parent:Point, value:"horizontal")
-ChangeEntireMemberName(member:x, parent:Point, value:"horizontal")
+cemn(target:x, parent:Point, value:"horizontal")
+ChangeEntireMemberName(target:x, parent:Point, value:"horizontal")
 ```
 
 ```rust
@@ -424,8 +425,8 @@ The type annotation (for struct fields) or the variant payload (for enum
 variants).
 
 ```
-cemv(member:count, parent:Stats, value:" usize")
-ChangeEntireMemberValue(member:count, parent:Stats, value:" usize")
+cemv(target:count, parent:Stats, value:" usize")
+ChangeEntireMemberValue(target:count, parent:Stats, value:" usize")
 ```
 
 ```rust
@@ -440,8 +441,8 @@ struct Stats {                     struct Stats {
 Zero-width point at the end of the field/variant declaration.
 
 ```
-aeme(member:name, parent:User, value:"\n    email: String,")
-AppendEntireMemberEnd(member:name, parent:User, value:"\n    email: String,")
+aeme(target:name, parent:User, value:"\n    email: String,")
+AppendEntireMemberEnd(target:name, parent:User, value:"\n    email: String,")
 ```
 
 ```rust
@@ -540,8 +541,8 @@ other positionals demonstrated with various scope/component pairs.
 ### Before (`b`) -- text before the component
 
 ```
-dbfs(function:main)
-DeleteBeforeFunctionSelf(function:main)
+dbfs(target:main)
+DeleteBeforeFunctionSelf(target:main)
 ```
 
 ```rust
@@ -556,8 +557,8 @@ fn main() {                        }
 ### After (`a`) -- text after the component
 
 ```
-dafs(function:first)
-DeleteAfterFunctionSelf(function:first)
+dafs(target:first)
+DeleteAfterFunctionSelf(target:first)
 ```
 
 ```rust
@@ -602,8 +603,8 @@ Returns the scope minus the component. May produce two disjoint ranges (head
 and tail).
 
 ```
-dofp(function:add)
-DeleteOutsideFunctionParameters(function:add)
+dofp(target:add)
+DeleteOutsideFunctionParameters(target:add)
 ```
 
 ```rust
@@ -680,3 +681,7 @@ A chord with an invalid scope/component combination is rejected at parse time.
 | **Struct**     | --        | Y        | Y   | --    | --         | --        | Y    | Y    |
 | **Member**     | --        | --       | Y   | Y     | --         | --        | Y    | Y    |
 | **Delimiter**  | Y         | Y        | Y   | --    | --         | --        | Y    | Y    |
+
+---
+
+[<- Chord System](01-chord-system.md) | [Next: Using the TUI ->](03-using-the-tui.md)

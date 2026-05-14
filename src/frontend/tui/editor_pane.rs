@@ -41,15 +41,80 @@ pub(crate) fn display_col(line: &str, byte_idx: usize) -> usize {
         .sum()
 }
 
-pub(crate) fn visual_row_count(line: &str, text_width: usize) -> usize {
+pub(crate) fn byte_col_from_display(line: &str, target_display: usize) -> usize {
+    let mut display = 0;
+    let mut byte_idx = 0;
+    for c in line.chars() {
+        let w = if c == '\t' { 4 } else { 1 };
+        if display + w > target_display {
+            break;
+        }
+        display += w;
+        byte_idx += c.len_utf8();
+    }
+    byte_idx
+}
+
+pub(crate) fn wrap_offsets(line: &str, text_width: usize) -> Vec<usize> {
     if text_width == 0 {
-        return 1;
+        return vec![0];
     }
-    let display_width: usize = line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
-    if display_width == 0 {
-        return 1;
+    let expanded = expand_tabs(line);
+    let chars: Vec<char> = expanded.chars().collect();
+    if chars.is_empty() {
+        return vec![0];
     }
-    display_width.div_ceil(text_width)
+
+    let mut offsets = vec![0usize];
+    let mut col = 0;
+    let mut last_space = None;
+    let mut row_start = 0;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == ' ' {
+            last_space = Some(i);
+        }
+        col += 1;
+
+        if col >= text_width && i + 1 < chars.len() {
+            if let Some(sp) = last_space {
+                if sp > row_start {
+                    let break_at = sp + 1;
+                    offsets.push(break_at);
+                    row_start = break_at;
+                    col = (i + 1) - break_at;
+                    last_space = None;
+                    continue;
+                }
+            }
+            let break_at = i + 1;
+            offsets.push(break_at);
+            row_start = break_at;
+            col = 0;
+            last_space = None;
+        }
+    }
+
+    offsets
+}
+
+pub(crate) fn visual_row_count(line: &str, text_width: usize) -> usize {
+    wrap_offsets(line, text_width).len()
+}
+
+pub(crate) fn display_col_to_wrap_pos(offsets: &[usize], display_col: usize) -> (usize, usize) {
+    let mut row = 0;
+    for (i, &off) in offsets.iter().enumerate().rev() {
+        if display_col >= off {
+            row = i;
+            break;
+        }
+    }
+    (row, display_col - offsets[row])
+}
+
+pub(crate) fn wrap_row_start(offsets: &[usize], row: usize) -> usize {
+    offsets.get(row).copied().unwrap_or(0)
 }
 
 fn styled_line_with_tokens<'a>(
@@ -103,37 +168,50 @@ fn wrap_spans(spans: Vec<Span<'_>>, text_width: usize) -> Vec<Vec<Span<'static>>
         return vec![row];
     }
 
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-    let mut current_row: Vec<Span<'static>> = Vec::new();
-    let mut col: usize = 0;
+    let full_text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    let offsets = wrap_offsets(&full_text, text_width);
 
-    for span in spans {
+    let mut span_chars: Vec<(char, Style)> = Vec::new();
+    for span in &spans {
         let style = span.style;
-        let chars: Vec<char> = span.content.chars().collect();
-        let mut pos = 0;
-
-        while pos < chars.len() {
-            let space_left = text_width - col;
-            let remaining = chars.len() - pos;
-            let take = space_left.min(remaining);
-
-            let chunk: String = chars[pos..pos + take].iter().collect();
-            if !chunk.is_empty() {
-                current_row.push(Span::styled(chunk, style));
-            }
-            col += take;
-            pos += take;
-
-            if col >= text_width {
-                rows.push(current_row);
-                current_row = Vec::new();
-                col = 0;
-            }
+        for ch in span.content.chars() {
+            span_chars.push((ch, style));
         }
     }
 
-    if !current_row.is_empty() || rows.is_empty() {
-        rows.push(current_row);
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    for w in 0..offsets.len() {
+        let start = offsets[w];
+        let end = if w + 1 < offsets.len() {
+            offsets[w + 1]
+        } else {
+            span_chars.len()
+        };
+        let slice = &span_chars[start..end];
+
+        let mut row: Vec<Span<'static>> = Vec::new();
+        if !slice.is_empty() {
+            let mut cur_style = slice[0].1;
+            let mut cur_text = String::new();
+            for &(ch, style) in slice {
+                if style != cur_style {
+                    if !cur_text.is_empty() {
+                        row.push(Span::styled(cur_text, cur_style));
+                        cur_text = String::new();
+                    }
+                    cur_style = style;
+                }
+                cur_text.push(ch);
+            }
+            if !cur_text.is_empty() {
+                row.push(Span::styled(cur_text, cur_style));
+            }
+        }
+        rows.push(row);
+    }
+
+    if rows.is_empty() {
+        rows.push(Vec::new());
     }
 
     rows
@@ -150,7 +228,7 @@ pub fn render(
     match state.current_buffer() {
         Some(buf) => {
             let visible_height = area.height as usize;
-            let line_num_width = format!("{}", buf.line_count()).len();
+            let line_num_width = format!("{}", buf.line_count().saturating_sub(1)).len();
             let text_width = (area.width as usize).saturating_sub(line_num_width + 1);
             let use_highlighting = lsp_status == ServerState::Running;
 
@@ -187,14 +265,9 @@ pub fn render(
 
                 if is_current {
                     let cursor_display_col = display_col(line_text, state.cursor_col);
+                    let offsets = wrap_offsets(line_text, text_width);
                     let (c_wrap_row, c_col_in_row) =
-                        match text_width.checked_div(1).filter(|_| text_width > 0) {
-                            Some(_) => (
-                                cursor_display_col / text_width,
-                                cursor_display_col % text_width,
-                            ),
-                            None => (0, cursor_display_col),
-                        };
+                        display_col_to_wrap_pos(&offsets, cursor_display_col);
                     let max_row = wrapped_rows.len().saturating_sub(1);
                     let (final_row, final_col) = if c_wrap_row > max_row {
                         let last_row_len: usize = wrapped_rows.last().map_or(0, |spans| {
@@ -214,7 +287,7 @@ pub fn render(
                     }
 
                     let num_str = if wrap_idx == 0 {
-                        format!("{:>width$} ", logical_line + 1, width = line_num_width)
+                        format!("{:>width$} ", logical_line, width = line_num_width)
                     } else {
                         " ".repeat(line_num_width + 1)
                     };
@@ -269,5 +342,70 @@ pub fn render(
             let paragraph = Paragraph::new(welcome);
             frame.render_widget(paragraph, area);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_offsets_empty_line() {
+        assert_eq!(wrap_offsets("", 80), vec![0]);
+    }
+
+    #[test]
+    fn wrap_offsets_short_line_no_wrap() {
+        assert_eq!(wrap_offsets("hello world", 80), vec![0]);
+    }
+
+    #[test]
+    fn wrap_offsets_breaks_on_space() {
+        // "hello world" with width 8: "hello " fits (6 chars), then "wo" fills to 8
+        // but word-wrap should break after "hello " to keep "world" whole
+        let offsets = wrap_offsets("hello world", 8);
+        assert_eq!(offsets, vec![0, 6]);
+    }
+
+    #[test]
+    fn wrap_offsets_long_word_falls_back_to_char_break() {
+        let offsets = wrap_offsets("abcdefghij", 5);
+        assert_eq!(offsets, vec![0, 5]);
+    }
+
+    #[test]
+    fn wrap_offsets_multiple_wraps() {
+        let offsets = wrap_offsets("aaa bbb ccc ddd", 8);
+        assert_eq!(offsets, vec![0, 8]);
+    }
+
+    #[test]
+    fn wrap_offsets_exact_fit_no_extra_row() {
+        let offsets = wrap_offsets("12345", 5);
+        assert_eq!(offsets, vec![0]);
+    }
+
+    #[test]
+    fn visual_row_count_uses_word_wrap() {
+        assert_eq!(visual_row_count("hello world", 8), 2);
+        assert_eq!(visual_row_count("hi", 80), 1);
+    }
+
+    #[test]
+    fn display_col_to_wrap_pos_basic() {
+        let offsets = vec![0, 6];
+        assert_eq!(display_col_to_wrap_pos(&offsets, 0), (0, 0));
+        assert_eq!(display_col_to_wrap_pos(&offsets, 5), (0, 5));
+        assert_eq!(display_col_to_wrap_pos(&offsets, 6), (1, 0));
+        assert_eq!(display_col_to_wrap_pos(&offsets, 8), (1, 2));
+    }
+
+    #[test]
+    fn wrap_row_start_basic() {
+        let offsets = vec![0, 6, 12];
+        assert_eq!(wrap_row_start(&offsets, 0), 0);
+        assert_eq!(wrap_row_start(&offsets, 1), 6);
+        assert_eq!(wrap_row_start(&offsets, 2), 12);
+        assert_eq!(wrap_row_start(&offsets, 5), 0);
     }
 }

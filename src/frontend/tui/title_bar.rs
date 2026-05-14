@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
         name.clone()
     };
 
-    let right_text = format!(" {}:{} ", state.cursor_line + 1, state.cursor_col + 1);
+    let right_text = format!(" {}:{} ", state.cursor_line, state.cursor_col);
 
     let center_len = center_text.len();
     let right_len = right_text.len();

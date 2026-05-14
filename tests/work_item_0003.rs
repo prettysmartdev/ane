@@ -143,7 +143,7 @@ fn no_change_chord_produces_empty_stdout_and_zero_exit() {
         .args([
             "exec",
             "--chord",
-            r#"cels(line:0, value:"hello world")"#,
+            r#"cels(target:0, value:"hello world")"#,
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -208,7 +208,7 @@ fn binary_file_via_binary_exits_nonzero() {
         .args([
             "exec",
             "--chord",
-            "cels(line:0, value:x)",
+            "cels(target:0, value:x)",
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -250,7 +250,7 @@ fn out_of_range_line_via_binary_exits_nonzero() {
         .args([
             "exec",
             "--chord",
-            "cels(line:100, value:x)",
+            "cels(target:100, value:x)",
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -278,7 +278,7 @@ fn yank_writes_content_to_stdout_not_to_file() {
         .args([
             "exec",
             "--chord",
-            "yels(line:0)",
+            "yels(target:0)",
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -307,7 +307,7 @@ fn end_to_end_smoke_test_diff_output_and_file_update() {
         .args([
             "exec",
             "--chord",
-            r#"cels(line:0, value:"replaced first line")"#,
+            r#"cels(target:0, value:"replaced first line")"#,
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -357,7 +357,7 @@ fn binary_preserves_trailing_newline_when_present() {
         .args([
             "exec",
             "--chord",
-            r#"cels(line:0, value:"fn other() {}")"#,
+            r#"cels(target:0, value:"fn other() {}")"#,
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -378,7 +378,7 @@ fn binary_preserves_absence_of_trailing_newline() {
         .args([
             "exec",
             "--chord",
-            r#"cels(line:0, value:"fn other() {}")"#,
+            r#"cels(target:0, value:"fn other() {}")"#,
             &f.path().to_string_lossy(),
         ])
         .output()
@@ -407,7 +407,7 @@ fn stdin_with_trailing_newline_matches_inline_value() {
         .args([
             "exec",
             "--chord",
-            "cels(line:0, value:-)",
+            "cels(target:0, value:-)",
             &from_stdin.path().to_string_lossy(),
         ])
         .stdin(Stdio::piped())
@@ -429,7 +429,7 @@ fn stdin_with_trailing_newline_matches_inline_value() {
         .args([
             "exec",
             "--chord",
-            r#"cels(line:0, value:"piped value")"#,
+            r#"cels(target:0, value:"piped value")"#,
             &from_inline.path().to_string_lossy(),
         ])
         .output()
@@ -456,7 +456,7 @@ fn stdin_sentinel_piped_content_replaces_value_parameter() {
         .args([
             "exec",
             "--chord",
-            "cels(line:0, value:-)",
+            "cels(target:0, value:-)",
             &f.path().to_string_lossy(),
         ])
         .stdin(Stdio::piped())

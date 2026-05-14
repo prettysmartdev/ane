@@ -59,8 +59,8 @@ Objects:
 
 ### Arguments
 Arguments are passed as parenthesized key-value pairs after the chord:
-- `cifp(function:getData, value:"from: int, to: int")`
-- `dufe(line:49)`
+- `cifp(target:getData, value:"from: int, to: int")`
+- `dufe(target:49)`
 - In TUI mode, arguments can be omitted when cursor context is sufficient
 
 ### LSP Gating

@@ -326,7 +326,7 @@ Wire the exec command into the CLI's main entry point.
 - Exit codes: 0 for success (including no-change idempotent), 1 for any failure
 
 **Test coverage**:
-- CLI test: `ane exec --chord "cels(line:0, value:replaced)" file.rs` produces diff and exits 0
+- CLI test: `ane exec --chord "cels(target:0, value:replaced)" file.rs` produces diff and exits 0
 - CLI test: `ane exec` with missing file exits 1 with error on stderr
 - CLI test: `ane exec` with binary file exits 1 with error on stderr
 - CLI test: `ane exec` with out-of-range line exits 1 with line-range error
@@ -583,7 +583,7 @@ All tests should pass with the implementation complete.
 - [ ] `cargo test work_item_0003` — all tests pass
 - [ ] `cargo clippy -- -D warnings` — no lints
 - [ ] `cargo fmt --check` — code is formatted
-- [ ] Manual smoke test: `ane exec --chord "cels(line:0, value:replaced)" test.rs`
+- [ ] Manual smoke test: `ane exec --chord "cels(target:0, value:replaced)" test.rs`
 
 ---
 
