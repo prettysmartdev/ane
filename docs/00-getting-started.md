@@ -41,7 +41,7 @@ Chords that target language constructs (Function, Variable, Struct, Member) use 
 
 Line, Buffer, and Delimiter scopes work immediately without LSP.
 
-Currently supported: **Rust** (rust-analyzer). More languages planned.
+Supported: **Rust** (rust-analyzer), **Go** (gopls), **TypeScript/JavaScript** (vtsls), **Python** (basedpyright). All include tree-sitter syntax highlighting. **Markdown** has tree-sitter highlighting with no LSP server.
 
 ---
 

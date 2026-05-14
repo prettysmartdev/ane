@@ -10,7 +10,7 @@ This guide explains how syntax highlighting works, which languages are supported
 
 ### Two-tier pipeline
 
-When you open a file, ane runs two highlighting passes in parallel:
+When you open or edit a file, ane runs two highlighting passes in parallel:
 
 1. **Tree-sitter (synchronous, ~2ms)**
    - Parses the code structure immediately

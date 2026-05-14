@@ -89,4 +89,15 @@ Non-LSP chords (Line, Buffer, Delimiter) work immediately regardless of LSP stat
 
 ---
 
+## Syntax highlighting
+
+ane merges two highlighting sources into a single pass:
+
+1. **tree-sitter** — runs immediately on open, producing structural highlights (keywords, strings, comments, types) with no server required.
+2. **LSP semantic tokens** — added once the language server is ready, layering type-aware colors on top (e.g. distinguishing a local variable from a function parameter, or a mutable binding from an immutable one).
+
+LSP tokens take precedence where they overlap, so colors become richer as the server initializes without any visible flash or re-render.
+
+---
+
 [<- Chord Examples](02-chord-examples.md) | [Next: Exec Mode ->](04-exec-mode.md)

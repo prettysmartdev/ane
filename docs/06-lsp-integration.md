@@ -35,9 +35,13 @@ LSP-scoped chords wait for the server to reach the `Running` state before execut
 
 | Language | Server | Detection |
 |----------|--------|-----------|
-| Rust | rust-analyzer | `Cargo.toml` in project root |
+| Rust | rust-analyzer | `Cargo.toml` |
+| Go | gopls | `go.mod`, `go.work` |
+| TypeScript / JavaScript | vtsls | `package.json`, `tsconfig.json` |
+| Python | basedpyright | `pyproject.toml`, `pyrightconfig.json`, `setup.py` |
+| Markdown | — | `.md`, `.markdown` (tree-sitter only) |
 
-More languages will be added. The LSP engine is designed to support any language server that implements the Language Server Protocol.
+For full details on syntax highlighting, file extension mappings, and per-language behaviour, see [Syntax Highlighting and Languages](09-syntax-highlighting-and-languages.md).
 
 ---
 

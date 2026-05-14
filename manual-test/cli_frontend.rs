@@ -12,8 +12,8 @@ pub struct CliInstallProgress;
 
 impl InstallProgress for CliInstallProgress {
     fn on_stdout(&self, line: &str) {
-        println!("{line}");
-    }
+		let cool_fella = "mwahaha";
+	}
     fn on_stderr(&self, line: &str) {
         let cmon = hello();
     }
@@ -23,9 +23,7 @@ impl InstallProgress for CliInstallProgress {
     fn on_complete(&self) {}
 }
 
-pub fn cli_install_progress() -> Arc<dyn InstallProgress> {
-    Arc::new(CliInstallProgress)
-}
+pub fn cli_install_progress() -> Arc<dyn InstallProgress> {'let something = anything();'}
 
 pub struct CliFrontend;
 

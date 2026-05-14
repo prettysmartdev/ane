@@ -63,7 +63,7 @@ sudo make install
 
 **A New Editor** / **Agent Native Editor**
 
-`ane` is a new take on chord-based code editing in the terminal. By combining 1) language server support by default, 2) a language-server-aware chord system and 3) one-shot editing via CLI, `ane` aims to help with focused, efficient edit to source code for humans and code agents.
+`ane` is a new take on chord-based code editing in the terminal. By combining 1) **one-shot code editing** for scripts and code agents via `ane exec`, 2) **language server and tree-sitter** support by default, and 3) a **language-server-aware chord system**, `ane` aims to help with focused, efficient edits to source code for humans and code agents alike.
 
 **Note:** `ane` is still early and everything including supported chords, languages, and TUI/CLI features are still a work in progress. There will be vim chords that don't have an equivalent (yet). If you have a desired chord component, language, or feature you'd like to see added to `ane`, issues and PRs are always welcome. `ane` is my daily driver editor already, and I will be working to improve it rapidly.
 
@@ -71,7 +71,7 @@ sudo make install
 
 1. **Chord-native editing** -- a 4-part chord system (action, positional, scope, component) for expressive, composable editing operations
 2. **Agent-native interface** -- a headless `exec` mode that lets AI code agents read and modify files with minimal token usage, outputting standard unified diffs
-3. **LSP-integrated** -- native language server integration for language-aware chords (starting with Rust/rust-analyzer)
+3. **LSP-integrated** -- native language server integration for language-aware chords (Rust, Go, TypeScript/JavaScript, Python)
 
 ### Non-goals
 1. Be a perfect drop-in replacement for {favorite editor}. ane's similar-but-different chord system, lack of plugin system, and small-but-reasonable core featureset means it won't replace VSCode or your highly curated vim setup. It's an experiment on merging chords and language servers to see if humans and agents can develop code more efficiently.
@@ -121,6 +121,8 @@ ane .
 # Open a specific file
 ane path/to/file.rs
 ```
+
+![ane TUI editor](docs/images/ane-tui-screenshot.png)
 
 **Keybindings:**
 
@@ -194,9 +196,19 @@ ane natively integrates with language servers for language-aware chord operation
 - **Status display**: the TUI status bar shows LSP status (ready, starting, not installed, failed)
 - **Chord gating**: chords marked `requires_lsp: true` wait for LSP readiness; non-LSP chords execute immediately
 - **Install assistance**: if the language server isn't installed, ane automatically installs if possible
-- **Syntax highlighting**: LSP-powered syntax highlighting enabled by default
+- **Syntax highlighting**: tree-sitter provides immediate structural highlighting on open; LSP semantic tokens add type-aware colors once the server is ready
 
-Currently supported: **Rust** (rust-analyzer). More languages will be added.
+Supported languages:
+
+| Language | LSP server | Detection |
+|----------|------------|-----------|
+| Rust | rust-analyzer | `Cargo.toml` |
+| Go | gopls | `go.mod`, `go.work` |
+| TypeScript / JavaScript | vtsls | `package.json`, `tsconfig.json` |
+| Python | basedpyright | `pyproject.toml`, `pyrightconfig.json`, `setup.py` |
+| Markdown | — | `.md`, `.markdown` |
+
+All languages include tree-sitter syntax highlighting. See [Syntax Highlighting and Languages](docs/09-syntax-highlighting-and-languages.md) for details.
 
 See [LSP Integration](docs/06-lsp-integration.md) for details.
 

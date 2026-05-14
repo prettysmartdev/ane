@@ -36,7 +36,7 @@ Vim is the most widely installed terminal editor. Its modal editing model (Norma
 Neovim is a modernized fork of Vim with a built-in LSP client, first-class Lua scripting, and tree-sitter integration. It maintains full compatibility with Vim's editing model while adding async I/O, a remote plugin architecture, and a built-in terminal emulator.
 
 **Where Neovim is stronger:**
-- Built-in LSP client *and* tree-sitter for syntax highlighting, code navigation, and text objects. ane has LSP but not tree-sitter.
+- Built-in LSP client *and* tree-sitter for syntax highlighting, code navigation, and text objects. ane has both LSP and tree-sitter; structural navigation is provided through LSP-aware jump chords (e.g. jump to function, variable, struct) rather than tree-sitter text objects.
 - Lua plugin ecosystem is large and actively growing (telescope, nvim-cmp, lazy.nvim, etc.).
 - Full Vim compatibility -- everything you know from Vim works here.
 - Remote plugin API allows extensions in any language via MessagePack RPC.
@@ -85,7 +85,7 @@ Helix is a modern terminal editor written in Rust with built-in LSP, tree-sitter
 
 **Where Helix is stronger:**
 - Selection-first editing gives immediate visual feedback: you select text first, then apply an action. This makes it easier to verify what you're about to change.
-- Built-in tree-sitter provides fast, accurate syntax highlighting and structural navigation. ane does not yet have tree-sitter.
+- Built-in tree-sitter provides fast, accurate syntax highlighting and structural navigation. ane uses tree-sitter for syntax highlighting and provides structural navigation through LSP-aware jump chords, though not through tree-sitter text objects.
 - Built-in fuzzy file/symbol finder, surround manipulation, and multiple cursors -- all without plugins.
 - Larger community and more active development (Helix has significantly more contributors and users).
 - More mature TUI with features like split panes, picker menus, and inline diagnostics.
