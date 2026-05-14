@@ -6,23 +6,40 @@ use ratatui::{
     Frame,
 };
 
-use crate::data::lsp::types::{SemanticToken, ServerState};
+use crate::data::lsp::types::SemanticToken;
 use crate::data::state::{EditorState, Mode};
 
-fn token_type_color(token_type: &str) -> Color {
+fn token_style(token_type: &str) -> Style {
     match token_type {
-        "keyword" | "modifier" => Color::Blue,
-        "function" | "method" => Color::Yellow,
-        "type" | "class" | "struct" | "enum" | "interface" | "typeParameter" => Color::Cyan,
-        "string" => Color::Green,
-        "number" => Color::Magenta,
-        "comment" => Color::DarkGray,
-        "variable" | "parameter" | "property" => Color::White,
-        "macro" => Color::LightMagenta,
-        "operator" => Color::LightRed,
-        "namespace" => Color::LightCyan,
-        "enumMember" => Color::Cyan,
-        _ => Color::Gray,
+        "keyword" | "modifier" => Style::default().fg(Color::Blue),
+        "function" | "method" => Style::default().fg(Color::Yellow),
+        "type" | "class" | "struct" | "enum" | "interface" | "typeParameter" => {
+            Style::default().fg(Color::Cyan)
+        }
+        "string" => Style::default().fg(Color::Green),
+        "number" => Style::default().fg(Color::Magenta),
+        "comment" => Style::default().fg(Color::DarkGray),
+        "variable" | "parameter" | "property" => Style::default().fg(Color::White),
+        "macro" => Style::default().fg(Color::LightMagenta),
+        "operator" => Style::default().fg(Color::LightRed),
+        "namespace" => Style::default().fg(Color::LightCyan),
+        "enumMember" => Style::default().fg(Color::Cyan),
+        // Markdown token types
+        "heading" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        // strong/emphasis intentionally omit fg so they inherit the outer
+        // color when nested inside a heading or other styled range.
+        "strong" => Style::default().add_modifier(Modifier::BOLD),
+        "emphasis" => Style::default().add_modifier(Modifier::ITALIC),
+        "code" => Style::default().fg(Color::Green),
+        "link" => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::UNDERLINED),
+        "quote" => Style::default().fg(Color::DarkGray),
+        "list_marker" => Style::default().fg(Color::Yellow),
+        "punctuation" => Style::default().fg(Color::DarkGray),
+        _ => Style::default().fg(Color::Gray),
     }
 }
 
@@ -123,37 +140,47 @@ fn styled_line_with_tokens<'a>(
     tokens: &[SemanticToken],
     base_style: Style,
 ) -> Vec<Span<'a>> {
-    let line_tokens: Vec<&SemanticToken> = tokens.iter().filter(|t| t.line == line_num).collect();
+    let chars: Vec<char> = line_text.chars().collect();
+    if chars.is_empty() {
+        return vec![Span::styled(expand_tabs(line_text), base_style)];
+    }
 
+    let line_tokens: Vec<&SemanticToken> = tokens.iter().filter(|t| t.line == line_num).collect();
     if line_tokens.is_empty() {
         return vec![Span::styled(expand_tabs(line_text), base_style)];
     }
 
-    let mut spans = Vec::new();
-    let mut pos = 0;
-    let chars: Vec<char> = line_text.chars().collect();
+    // Apply outer (longer) tokens first; inner (shorter) tokens patch on top
+    // via Style::patch, so e.g. an emphasis token nested in a heading adds
+    // ITALIC while inheriting the heading's fg+BOLD.
+    let mut sorted = line_tokens;
+    sorted.sort_by_key(|t| std::cmp::Reverse(t.length));
 
-    for token in &line_tokens {
-        let start = token.start_col;
+    let mut styles: Vec<Style> = vec![base_style; chars.len()];
+    for token in &sorted {
+        let style = token_style(&token.token_type);
+        let start = token.start_col.min(chars.len());
         let end = (token.start_col + token.length).min(chars.len());
-
-        if start > pos {
-            let text: String = chars[pos..start.min(chars.len())].iter().collect();
-            spans.push(Span::styled(expand_tabs(&text), base_style));
+        for cell in styles.iter_mut().take(end).skip(start) {
+            *cell = cell.patch(style);
         }
-
-        if start < chars.len() {
-            let text: String = chars[start..end].iter().collect();
-            let color = token_type_color(&token.token_type);
-            spans.push(Span::styled(expand_tabs(&text), Style::default().fg(color)));
-        }
-
-        pos = end;
     }
 
-    if pos < chars.len() {
-        let text: String = chars[pos..].iter().collect();
-        spans.push(Span::styled(expand_tabs(&text), base_style));
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut run_style = styles[0];
+    let mut run = String::new();
+    for (i, &ch) in chars.iter().enumerate() {
+        if styles[i] != run_style {
+            if !run.is_empty() {
+                spans.push(Span::styled(expand_tabs(&run), run_style));
+                run.clear();
+            }
+            run_style = styles[i];
+        }
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(expand_tabs(&run), run_style));
     }
 
     spans
@@ -221,7 +248,6 @@ pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &EditorState,
-    lsp_status: ServerState,
     semantic_tokens: &[SemanticToken],
 ) {
     frame.render_widget(Clear, area);
@@ -230,7 +256,7 @@ pub fn render(
             let visible_height = area.height as usize;
             let line_num_width = format!("{}", buf.line_count().saturating_sub(1)).len();
             let text_width = (area.width as usize).saturating_sub(line_num_width + 1);
-            let use_highlighting = lsp_status == ServerState::Running;
+            let use_highlighting = !semantic_tokens.is_empty();
 
             let mut visual_lines: Vec<Line> = Vec::new();
             let mut cursor_visual_row: Option<usize> = None;
@@ -407,5 +433,84 @@ mod tests {
         assert_eq!(wrap_row_start(&offsets, 1), 6);
         assert_eq!(wrap_row_start(&offsets, 2), 12);
         assert_eq!(wrap_row_start(&offsets, 5), 0);
+    }
+
+    #[test]
+    fn token_style_markdown_heading_is_bold_yellow() {
+        let style = token_style("heading");
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(
+            style.add_modifier.contains(Modifier::BOLD),
+            "heading should be bold"
+        );
+    }
+
+    #[test]
+    fn token_style_markdown_emphasis_is_italic() {
+        let style = token_style("emphasis");
+        assert!(
+            style.add_modifier.contains(Modifier::ITALIC),
+            "emphasis should be italic"
+        );
+    }
+
+    #[test]
+    fn token_style_markdown_code_is_green() {
+        let style = token_style("code");
+        assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn styled_line_overlap_heading_emphasis_merges_styles() {
+        // "## Hello *world*"
+        //  0         1
+        //  0123456789012345
+        // Heading covers 0..16, emphasis covers 9..16.
+        // The emphasis range should end up bold+italic+yellow (heading wins on
+        // fg/bold, emphasis adds italic via Style::patch).
+        let line = "## Hello *world*";
+        let tokens = vec![
+            SemanticToken {
+                line: 0,
+                start_col: 0,
+                length: 16,
+                token_type: "heading".to_string(),
+            },
+            SemanticToken {
+                line: 0,
+                start_col: 9,
+                length: 7,
+                token_type: "emphasis".to_string(),
+            },
+        ];
+        let spans = styled_line_with_tokens(line, 0, &tokens, Style::default().fg(Color::Gray));
+
+        let yellow_bold_only = spans.iter().find(|s| {
+            s.style.fg == Some(Color::Yellow)
+                && s.style.add_modifier.contains(Modifier::BOLD)
+                && !s.style.add_modifier.contains(Modifier::ITALIC)
+        });
+        assert!(
+            yellow_bold_only.is_some(),
+            "expected a heading-only segment (yellow+bold, no italic); got {:?}",
+            spans
+        );
+
+        let yellow_bold_italic = spans.iter().find(|s| {
+            s.style.fg == Some(Color::Yellow)
+                && s.style.add_modifier.contains(Modifier::BOLD)
+                && s.style.add_modifier.contains(Modifier::ITALIC)
+        });
+        assert!(
+            yellow_bold_italic.is_some(),
+            "expected a heading+emphasis segment (yellow+bold+italic); got {:?}",
+            spans
+        );
+
+        let concat: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            concat, line,
+            "rendered spans should reconstruct the line exactly"
+        );
     }
 }

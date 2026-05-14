@@ -66,4 +66,10 @@ Non-LSP chords (Line, Buffer, Delimiter) bypass this gate entirely and execute i
 
 ---
 
-[<- Embedding via Crate](05-embedding-via-crate.md) | [Next: Architecture Overview ->](07-architecture-overview.md)
+## Syntax highlighting
+
+ane provides syntax highlighting through a combination of tree-sitter (fast, structural) and LSP semantic tokens (type-aware). For a detailed explanation of how syntax highlighting works, which languages are supported, and how multi-language projects are handled, see [Syntax Highlighting and Languages](09-syntax-highlighting-and-languages.md).
+
+---
+
+[<- Embedding via Crate](05-embedding-via-crate.md) | [Next: Architecture Overview ->](07-architecture-overview.md) | [Syntax Highlighting ->](09-syntax-highlighting-and-languages.md)

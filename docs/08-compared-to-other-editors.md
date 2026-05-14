@@ -188,4 +188,4 @@ Every editor on this list is a good editor. The right choice depends on what you
 
 ---
 
-[<- Architecture Overview](07-architecture-overview.md)
+[<- Architecture Overview](07-architecture-overview.md) | [Next: Syntax Highlighting ->](09-syntax-highlighting-and-languages.md)

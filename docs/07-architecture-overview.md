@@ -93,4 +93,4 @@ This design means the chord engine doesn't know which frontend is running -- it 
 
 ---
 
-[<- LSP Integration](06-lsp-integration.md) | [Next: Compared to Other Editors ->](08-compared-to-other-editors.md)
+[<- LSP Integration](06-lsp-integration.md) | [Next: Compared to Other Editors ->](08-compared-to-other-editors.md) | [Syntax Highlighting ->](09-syntax-highlighting-and-languages.md)

@@ -17,6 +17,7 @@ A guide to using ane, the chord-based terminal code editor for humans and agents
 | 06 | [LSP Integration](06-lsp-integration.md) | Language server support, auto-detection, status, chord gating |
 | 07 | [Architecture Overview](07-architecture-overview.md) | Three-layer design, module layout, dependency rules |
 | 08 | [Compared to Other Editors](08-compared-to-other-editors.md) | Trade-offs vs Vim, Neovim, Emacs, Helix, Kakoune, nano, micro |
+| 09 | [Syntax Highlighting and Languages](09-syntax-highlighting-and-languages.md) | Tree-sitter + LSP pipeline, supported languages, multi-language projects, per-language examples |
 
 ---
 
