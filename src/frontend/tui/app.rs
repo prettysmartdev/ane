@@ -28,6 +28,39 @@ use super::exit_modal;
 use super::status_bar;
 use super::title_bar;
 use super::tree_pane;
+
+fn prev_char_boundary(s: &str, from: usize) -> usize {
+    let mut idx = from.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    if idx > 0 {
+        idx -= 1;
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
+    }
+    idx
+}
+
+fn next_char_boundary(s: &str, from: usize) -> usize {
+    let mut idx = from.min(s.len());
+    if idx < s.len() {
+        idx += 1;
+        while idx < s.len() && !s.is_char_boundary(idx) {
+            idx += 1;
+        }
+    }
+    idx
+}
+
+fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
+    let mut idx = pos.min(s.len());
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
 use super::tui_frontend::TuiFrontend;
 
 use crate::frontend::traits::ApplyChordAction;
@@ -184,7 +217,8 @@ fn event_loop(
             (s.status, s.semantic_tokens.clone())
         };
 
-        adjust_scroll_offset(state, terminal.size()?.height);
+        let term_size = terminal.size()?;
+        adjust_scroll_offset(state, term_size.height, term_size.width);
 
         if lsp_status == ServerState::Running && semantic_tokens.is_empty() {
             if let Some(buf) = state.current_buffer() {
@@ -230,11 +264,11 @@ fn event_loop(
     }
 }
 
-fn adjust_scroll_offset(state: &mut EditorState, term_height: u16) {
-    let Some(buf) = state.current_buffer() else {
-        return;
+fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u16) {
+    let total = match state.current_buffer() {
+        Some(buf) => buf.line_count(),
+        None => return,
     };
-    let total = buf.line_count();
     let chord_box_rows: usize = if state.mode == Mode::Chord && !state.focus_tree {
         4
     } else {
@@ -246,14 +280,51 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16) {
         return;
     }
 
+    let line_num_width = format!("{}", total).len();
+    let has_tree = state.file_tree.is_some() && state.focus_tree;
+    let editor_width = if has_tree {
+        (term_width as usize) / 2
+    } else {
+        term_width as usize
+    };
+    let text_width = editor_width.saturating_sub(line_num_width + 1);
+
     if state.cursor_line < state.scroll_offset {
         state.scroll_offset = state.cursor_line;
-    } else if state.cursor_line >= state.scroll_offset + visible {
-        state.scroll_offset = state.cursor_line + 1 - visible;
     }
-    let max = total.saturating_sub(visible);
-    if state.scroll_offset > max {
-        state.scroll_offset = max;
+
+    let active = state.active_buffer;
+    loop {
+        let mut visual_rows = 0;
+        let cursor = state.cursor_line.min(total.saturating_sub(1));
+        for i in state.scroll_offset..=cursor {
+            let line = state.buffers[active]
+                .lines
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            if i == cursor {
+                let cursor_display_col = editor_pane::display_col(line, state.cursor_col);
+                let cursor_row_in_line = if text_width > 0 {
+                    cursor_display_col / text_width
+                } else {
+                    0
+                };
+                visual_rows += cursor_row_in_line + 1;
+            } else {
+                visual_rows += editor_pane::visual_row_count(line, text_width);
+            }
+        }
+
+        if visual_rows <= visible || state.scroll_offset >= state.cursor_line {
+            break;
+        }
+
+        state.scroll_offset += 1;
+    }
+
+    if state.scroll_offset >= total {
+        state.scroll_offset = total.saturating_sub(1);
     }
 }
 
@@ -266,7 +337,11 @@ fn draw(
     let has_tree = state.file_tree.is_some() && state.focus_tree;
 
     let h_constraints = if has_tree {
-        vec![Constraint::Percentage(25), Constraint::Percentage(75)]
+        let content_w = tree_pane::content_width(&state.tree_view) as u16;
+        let desired = content_w + 3; // +1 padding, +2 borders
+        let max_w = frame.area().width / 2;
+        let tree_w = desired.min(max_w);
+        vec![Constraint::Length(tree_w), Constraint::Min(0)]
     } else {
         vec![Constraint::Length(0), Constraint::Percentage(100)]
     };
@@ -468,13 +543,26 @@ fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             }
         }
         KeyCode::Left => {
-            if let Some(entry) = state
-                .tree_view
-                .get(state.tree_selected)
-                .filter(|e| e.is_dir)
-            {
-                let _ = entry;
-                tree_pane::collapse(state, state.tree_selected);
+            let selected = state.tree_selected;
+            let is_expanded_dir = state.tree_view.get(selected).is_some_and(|e| {
+                e.is_dir
+                    && state
+                        .tree_view
+                        .get(selected + 1)
+                        .is_some_and(|next| next.depth > e.depth)
+            });
+            if is_expanded_dir {
+                tree_pane::collapse(state, selected);
+            } else if let Some(depth) = state.tree_view.get(selected).map(|e| e.depth) {
+                if depth > 0 {
+                    let parent = (0..selected).rev().find(|&j| {
+                        state.tree_view[j].is_dir && state.tree_view[j].depth < depth
+                    });
+                    if let Some(idx) = parent {
+                        state.tree_selected = idx;
+                        tree_pane::collapse(state, idx);
+                    }
+                }
             }
         }
         KeyCode::Enter => {
@@ -511,29 +599,42 @@ fn handle_chord_mode(
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
         }
+        KeyCode::Char('r')
+            if modifiers.contains(KeyModifiers::CONTROL) && !state.chord_history.is_empty() =>
+        {
+            let idx = match state.chord_history_index {
+                Some(i) if i > 0 => i - 1,
+                Some(_) => 0,
+                None => state.chord_history.len() - 1,
+            };
+            state.chord_history_index = Some(idx);
+            state.chord_input = state.chord_history[idx].clone();
+            state.chord_cursor_col = state.chord_input.len();
+            state.chord_error = false;
+        }
         KeyCode::Up if state.chord_input.is_empty() => {
             state.cursor_line = state.cursor_line.saturating_sub(1);
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = state.cursor_col.min(line.len());
+            }
         }
         KeyCode::Down if state.chord_input.is_empty() => {
-            if let Some(buf) = state.current_buffer() {
-                if state.cursor_line + 1 < buf.line_count() {
-                    state.cursor_line += 1;
-                }
+            let next_len = state.current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line + 1))
+                .map(|l| l.len());
+            if let Some(len) = next_len {
+                state.cursor_line += 1;
+                state.cursor_col = state.cursor_col.min(len);
             }
         }
         KeyCode::Left if state.chord_input.is_empty() => {
-            state.cursor_col = state.cursor_col.saturating_sub(1);
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
+            }
         }
         KeyCode::Right if state.chord_input.is_empty() => {
-            if let Some(buf) = state.current_buffer() {
-                let max = buf
-                    .lines
-                    .get(state.cursor_line)
-                    .map(|l| l.len())
-                    .unwrap_or(0);
-                if state.cursor_col < max {
-                    state.cursor_col += 1;
-                }
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
             }
         }
         KeyCode::Left => {
@@ -548,6 +649,13 @@ fn handle_chord_mode(
                 Ok(_) => {
                     clear_chord(state);
                     execute_chord_input(state, frontend, engine, &input, lsp_status);
+                    if !state.status_msg.starts_with("error:")
+                        && !state.status_msg.starts_with("resolve error:")
+                        && !state.status_msg.starts_with("patch error:")
+                        && !state.status_msg.starts_with("parse error:")
+                    {
+                        state.chord_history.push(input.clone());
+                    }
                     if lsp_status == ServerState::Running {
                         if let Some(buf) = state.current_buffer() {
                             let _ = token_tx.try_send((buf.path.clone(), buf.content()));
@@ -565,6 +673,7 @@ fn handle_chord_mode(
             state.chord_input.remove(col - 1);
             state.chord_cursor_col = col - 1;
             state.chord_error = false;
+            state.chord_history_index = None;
             try_auto_submit(state, frontend, engine, token_tx, lsp_status);
         }
         KeyCode::Esc => {
@@ -576,6 +685,7 @@ fn handle_chord_mode(
             state.chord_input.insert(col, c);
             state.chord_cursor_col = col + 1;
             state.chord_error = false;
+            state.chord_history_index = None;
             try_auto_submit(state, frontend, engine, token_tx, lsp_status);
         }
         _ => {}
@@ -600,6 +710,13 @@ fn try_auto_submit(
             state.chord_running = true;
             clear_chord(state);
             execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+            if !state.status_msg.starts_with("error:")
+                && !state.status_msg.starts_with("resolve error:")
+                && !state.status_msg.starts_with("patch error:")
+                && !state.status_msg.starts_with("parse error:")
+            {
+                state.chord_history.push(input_clone);
+            }
             state.chord_running = false;
             if lsp_status == ServerState::Running {
                 if let Some(buf) = state.current_buffer() {
@@ -616,6 +733,13 @@ fn try_auto_submit(
         state.chord_running = true;
         clear_chord(state);
         execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+        if !state.status_msg.starts_with("error:")
+            && !state.status_msg.starts_with("resolve error:")
+            && !state.status_msg.starts_with("patch error:")
+            && !state.status_msg.starts_with("parse error:")
+        {
+            state.chord_history.push(input_clone);
+        }
         state.chord_running = false;
         if lsp_status == ServerState::Running {
             if let Some(buf) = state.current_buffer() {
@@ -630,6 +754,7 @@ fn clear_chord(state: &mut EditorState) {
     state.chord_cursor_col = 0;
     state.chord_error = false;
     state.chord_running = false;
+    state.chord_history_index = None;
 }
 
 fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -653,7 +778,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
                 if line < buf.lines.len() {
-                    let col = col.min(buf.lines[line].len());
+                    let col = snap_to_char_boundary(&buf.lines[line], col);
                     buf.lines[line].insert(col, '\t');
                     buf.dirty = true;
                     state.cursor_col = col + 1;
@@ -663,27 +788,27 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
         }
         KeyCode::Up => {
             state.cursor_line = state.cursor_line.saturating_sub(1);
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = state.cursor_col.min(line.len());
+            }
         }
         KeyCode::Down => {
-            if let Some(buf) = state.current_buffer() {
-                if state.cursor_line + 1 < buf.line_count() {
-                    state.cursor_line += 1;
-                }
+            let next_len = state.current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line + 1))
+                .map(|l| l.len());
+            if let Some(len) = next_len {
+                state.cursor_line += 1;
+                state.cursor_col = state.cursor_col.min(len);
             }
         }
         KeyCode::Left => {
-            state.cursor_col = state.cursor_col.saturating_sub(1);
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = prev_char_boundary(line, state.cursor_col.min(line.len()));
+            }
         }
         KeyCode::Right => {
-            if let Some(buf) = state.current_buffer() {
-                let max = buf
-                    .lines
-                    .get(state.cursor_line)
-                    .map(|l| l.len())
-                    .unwrap_or(0);
-                if state.cursor_col < max {
-                    state.cursor_col += 1;
-                }
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                state.cursor_col = next_char_boundary(line, snap_to_char_boundary(line, state.cursor_col));
             }
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
@@ -691,10 +816,10 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
                 if line < buf.lines.len() {
-                    let col = col.min(buf.lines[line].len());
+                    let col = snap_to_char_boundary(&buf.lines[line], col);
                     buf.lines[line].insert(col, c);
                     buf.dirty = true;
-                    state.cursor_col = col + 1;
+                    state.cursor_col = col + c.len_utf8();
                     modified = true;
                 }
             }
@@ -703,12 +828,18 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             let line = state.cursor_line;
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                if col > 0 && line < buf.lines.len() {
-                    buf.lines[line].remove(col - 1);
+                let snapped = if line < buf.lines.len() {
+                    snap_to_char_boundary(&buf.lines[line], col)
+                } else {
+                    0
+                };
+                if snapped > 0 && line < buf.lines.len() {
+                    let prev = prev_char_boundary(&buf.lines[line], snapped);
+                    buf.lines[line].drain(prev..snapped);
                     buf.dirty = true;
-                    state.cursor_col -= 1;
+                    state.cursor_col = prev;
                     modified = true;
-                } else if col == 0 && line > 0 {
+                } else if snapped == 0 && line > 0 {
                     let current_line = buf.lines.remove(line);
                     buf.dirty = true;
                     let prev_line = line - 1;
@@ -726,7 +857,7 @@ fn handle_edit_mode(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
             if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
                 if line < buf.lines.len() {
                     let current = buf.lines[line].clone();
-                    let col = col.min(current.len());
+                    let col = snap_to_char_boundary(&current, col);
                     let remainder = current[col..].to_string();
                     buf.lines[line] = current[..col].to_string();
                     buf.insert_line(line + 1, remainder);
@@ -893,7 +1024,7 @@ mod tests {
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 0;
         state.cursor_line = 15;
-        adjust_scroll_offset(&mut state, 20);
+        adjust_scroll_offset(&mut state, 20, 80);
         assert_eq!(state.scroll_offset, 2);
     }
 
@@ -904,7 +1035,7 @@ mod tests {
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 10;
         state.cursor_line = 3;
-        adjust_scroll_offset(&mut state, 20);
+        adjust_scroll_offset(&mut state, 20, 80);
         assert_eq!(state.scroll_offset, 3);
     }
 
@@ -915,7 +1046,7 @@ mod tests {
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 0;
         state.cursor_line = 5;
-        adjust_scroll_offset(&mut state, 20);
+        adjust_scroll_offset(&mut state, 20, 80);
         assert_eq!(state.scroll_offset, 0);
     }
 }

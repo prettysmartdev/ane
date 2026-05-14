@@ -74,6 +74,7 @@ ane path/to/file.rs
 | `Ctrl-E` | Toggle between Edit mode and Chord mode |
 | `Ctrl-T` | Toggle file tree pane (creates tree if opened with single file) |
 | `Ctrl-S` | Save file (works in any mode) |
+| `Ctrl-R` | Recall previous chord (Chord mode). Press repeatedly to cycle backwards through chord history. Press Enter to execute the recalled chord |
 | `Ctrl-C` | Exit confirmation modal (press again to exit, Esc to cancel) |
 | `Arrow keys` | Navigate (Edit/Chord: move cursor; Chord with input: left/right move chord cursor) |
 | `Tab` | Insert tab character (Edit mode only) |
@@ -201,6 +202,3 @@ src/
         └── tui_frontend.rs          # TUI implementation of ApplyChordAction
 ```
 
-## License
-
-MIT

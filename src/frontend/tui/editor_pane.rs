@@ -30,12 +30,26 @@ fn expand_tabs(s: &str) -> String {
     s.replace('\t', "    ")
 }
 
-fn display_col(line: &str, byte_idx: usize) -> usize {
-    let safe_idx = byte_idx.min(line.len());
+pub(crate) fn display_col(line: &str, byte_idx: usize) -> usize {
+    let mut safe_idx = byte_idx.min(line.len());
+    while safe_idx > 0 && !line.is_char_boundary(safe_idx) {
+        safe_idx -= 1;
+    }
     line[..safe_idx]
         .chars()
         .map(|c| if c == '\t' { 4 } else { 1 })
         .sum()
+}
+
+pub(crate) fn visual_row_count(line: &str, text_width: usize) -> usize {
+    if text_width == 0 {
+        return 1;
+    }
+    let display_width: usize = line.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
+    if display_width == 0 {
+        return 1;
+    }
+    (display_width + text_width - 1) / text_width
 }
 
 fn styled_line_with_tokens<'a>(
@@ -80,6 +94,51 @@ fn styled_line_with_tokens<'a>(
     spans
 }
 
+fn wrap_spans(spans: Vec<Span<'_>>, text_width: usize) -> Vec<Vec<Span<'static>>> {
+    if text_width == 0 {
+        let row = spans
+            .into_iter()
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect();
+        return vec![row];
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current_row: Vec<Span<'static>> = Vec::new();
+    let mut col: usize = 0;
+
+    for span in spans {
+        let style = span.style;
+        let chars: Vec<char> = span.content.chars().collect();
+        let mut pos = 0;
+
+        while pos < chars.len() {
+            let space_left = text_width - col;
+            let remaining = chars.len() - pos;
+            let take = space_left.min(remaining);
+
+            let chunk: String = chars[pos..pos + take].iter().collect();
+            if !chunk.is_empty() {
+                current_row.push(Span::styled(chunk, style));
+            }
+            col += take;
+            pos += take;
+
+            if col >= text_width {
+                rows.push(current_row);
+                current_row = Vec::new();
+                col = 0;
+            }
+        }
+    }
+
+    if !current_row.is_empty() || rows.is_empty() {
+        rows.push(current_row);
+    }
+
+    rows
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -91,100 +150,99 @@ pub fn render(
     match state.current_buffer() {
         Some(buf) => {
             let visible_height = area.height as usize;
-            let start = state.scroll_offset;
-            let end = (start + visible_height).min(buf.line_count());
-
             let line_num_width = format!("{}", buf.line_count()).len();
+            let text_width = (area.width as usize).saturating_sub(line_num_width + 1);
             let use_highlighting = lsp_status == ServerState::Running;
 
-            let lines: Vec<Line> = buf.lines[start..end]
-                .iter()
-                .enumerate()
-                .map(|(i, line_text)| {
-                    let line_num = start + i;
-                    let num_str = format!("{:>width$} ", line_num + 1, width = line_num_width);
+            let mut visual_lines: Vec<Line> = Vec::new();
+            let mut cursor_visual_row: Option<usize> = None;
+            let mut cursor_visual_col: Option<usize> = None;
+            let mut logical_line = state.scroll_offset;
 
-                    let is_current = line_num == state.cursor_line;
-                    let num_style = if is_current && state.mode == Mode::Edit {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+            while visual_lines.len() < visible_height && logical_line < buf.line_count() {
+                let line_text = &buf.lines[logical_line];
+                let is_current = logical_line == state.cursor_line;
+
+                let num_style = if is_current && state.mode == Mode::Edit {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let text_style = if is_current && state.mode == Mode::Edit {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+
+                let content_spans = if use_highlighting {
+                    styled_line_with_tokens(line_text, logical_line, semantic_tokens, text_style)
+                } else {
+                    vec![Span::styled(expand_tabs(line_text), text_style)]
+                };
+
+                let wrapped_rows = wrap_spans(content_spans, text_width);
+
+                if is_current {
+                    let cursor_display_col = display_col(line_text, state.cursor_col);
+                    let (c_wrap_row, c_col_in_row) = if text_width > 0 {
+                        (
+                            cursor_display_col / text_width,
+                            cursor_display_col % text_width,
+                        )
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        (0, cursor_display_col)
                     };
-
-                    let text_style = if is_current && state.mode == Mode::Edit {
-                        Style::default().fg(Color::White)
+                    let max_row = wrapped_rows.len().saturating_sub(1);
+                    let (final_row, final_col) = if c_wrap_row > max_row {
+                        let last_row_len: usize = wrapped_rows.last().map_or(0, |spans| {
+                            spans.iter().map(|s| s.content.chars().count()).sum()
+                        });
+                        (max_row, last_row_len)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        (c_wrap_row, c_col_in_row)
+                    };
+                    cursor_visual_row = Some(visual_lines.len() + final_row);
+                    cursor_visual_col = Some(final_col);
+                }
+
+                for (wrap_idx, row_spans) in wrapped_rows.into_iter().enumerate() {
+                    if visual_lines.len() >= visible_height {
+                        break;
+                    }
+
+                    let num_str = if wrap_idx == 0 {
+                        format!("{:>width$} ", logical_line + 1, width = line_num_width)
+                    } else {
+                        " ".repeat(line_num_width + 1)
                     };
 
                     let mut spans = vec![Span::styled(num_str, num_style)];
+                    spans.extend(row_spans);
+                    visual_lines.push(Line::from(spans));
+                }
 
-                    if use_highlighting {
-                        let token_spans = styled_line_with_tokens(
-                            line_text,
-                            line_num,
-                            semantic_tokens,
-                            text_style,
-                        );
-                        spans.extend(token_spans);
-                    } else {
-                        spans.push(Span::styled(expand_tabs(line_text), text_style));
-                    }
+                logical_line += 1;
+            }
 
-                    Line::from(spans)
-                })
-                .collect();
-
-            let paragraph = Paragraph::new(lines);
+            let paragraph = Paragraph::new(visual_lines);
             frame.render_widget(paragraph, area);
 
-            if state.mode == Mode::Edit && !state.focus_tree {
-                let cursor_row = state.cursor_line.saturating_sub(start);
-                let current_line = buf
-                    .lines
-                    .get(state.cursor_line)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let cursor_x = area.x
-                    + line_num_width as u16
-                    + 1
-                    + display_col(current_line, state.cursor_col) as u16;
-                let cursor_y = area.y + cursor_row as u16;
-                if state.cursor_line >= start
-                    && state.cursor_line < end
-                    && cursor_x < area.right()
-                    && cursor_y < area.bottom()
-                {
-                    frame.set_cursor_position(Position::new(cursor_x, cursor_y));
-                }
-            } else if state.mode == Mode::Chord
-                && !state.focus_tree
-                && state.cursor_line >= start
-                && state.cursor_line < end
-            {
-                let cursor_row = state.cursor_line - start;
-                let current_line = buf
-                    .lines
-                    .get(state.cursor_line)
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
-                let cursor_x = area.x
-                    + line_num_width as u16
-                    + 1
-                    + display_col(current_line, state.cursor_col) as u16;
-                let cursor_y = area.y + cursor_row as u16;
+            if let (Some(vis_row), Some(vis_col)) = (cursor_visual_row, cursor_visual_col) {
+                let cursor_x = area.x + line_num_width as u16 + 1 + vis_col as u16;
+                let cursor_y = area.y + vis_row as u16;
                 if cursor_x < area.right() && cursor_y < area.bottom() {
-                    let cursor_char = buf
-                        .lines
-                        .get(state.cursor_line)
-                        .and_then(|l| l.chars().nth(state.cursor_col))
-                        .unwrap_or(' ');
-                    let cell = Rect::new(cursor_x, cursor_y, 1, 1);
-                    let widget = Paragraph::new(cursor_char.to_string())
-                        .style(Style::default().bg(Color::Blue).fg(Color::White));
-                    frame.render_widget(widget, cell);
+                    if state.mode == Mode::Edit && !state.focus_tree {
+                        frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+                    } else if state.mode == Mode::Chord && !state.focus_tree {
+                        if let Some(cell) =
+                            frame.buffer_mut().cell_mut(Position::new(cursor_x, cursor_y))
+                        {
+                            cell.set_style(Style::default().bg(Color::Blue).fg(Color::White));
+                        }
+                    }
                 }
             }
         }

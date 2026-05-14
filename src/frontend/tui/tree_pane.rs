@@ -6,7 +6,20 @@ use ratatui::{
     Frame,
 };
 
+use crate::data::file_tree::FileEntry;
 use crate::data::state::EditorState;
+
+fn entry_display_width(entry: &FileEntry) -> usize {
+    2 * entry.depth + 2 + entry.name().chars().count()
+}
+
+pub fn content_width(tree_view: &[FileEntry]) -> usize {
+    tree_view
+        .iter()
+        .map(entry_display_width)
+        .max()
+        .unwrap_or(0)
+}
 
 pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
     let border_style = if state.focus_tree {
@@ -38,19 +51,27 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
         return;
     }
 
-    let inner_height = block.inner(area).height as usize;
+    let inner = block.inner(area);
+    let inner_height = inner.height as usize;
+    let inner_width = inner.width as usize;
 
-    let scroll = if state.tree_selected >= inner_height {
+    let v_scroll = if state.tree_selected >= inner_height {
         state.tree_selected - inner_height + 1
     } else {
         0
     };
 
+    let h_scroll = state
+        .tree_view
+        .get(state.tree_selected)
+        .map(|sel| entry_display_width(sel).saturating_sub(inner_width))
+        .unwrap_or(0);
+
     let lines: Vec<Line> = state
         .tree_view
         .iter()
         .enumerate()
-        .skip(scroll)
+        .skip(v_scroll)
         .take(inner_height)
         .map(|(i, entry)| {
             let indent = "  ".repeat(entry.depth);
@@ -71,6 +92,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
             let name = entry.name();
             let display = format!("{indent}{icon} {name}");
 
+            let scrolled: String = display.chars().skip(h_scroll).collect();
+
             let is_selected = i == state.tree_selected;
             let style = if is_selected && state.focus_tree {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -80,7 +103,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
                 Style::default().fg(Color::Gray)
             };
 
-            Line::from(Span::styled(display, style))
+            let text = if is_selected && state.focus_tree {
+                format!("{scrolled:<inner_width$}")
+            } else {
+                scrolled
+            };
+
+            Line::from(Span::styled(text, style))
         })
         .collect();
 
@@ -215,6 +244,8 @@ mod tests {
             chord_cursor_col: 0,
             chord_error: false,
             chord_running: false,
+            chord_history: Vec::new(),
+            chord_history_index: None,
             pre_tree_mode: Mode::Chord,
             pending_open_path: None,
             tree_view,

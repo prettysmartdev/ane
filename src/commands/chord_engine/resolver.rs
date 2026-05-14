@@ -98,7 +98,7 @@ fn resolve_scope(
 }
 
 fn resolve_line_scope(query: &ChordQuery, buffer: &Buffer, buffer_name: &str) -> Result<TextRange> {
-    let line = match query
+    let base_line = match query
         .args
         .target_line
         .or(query.args.cursor_pos.map(|(l, _)| l))
@@ -111,6 +111,34 @@ fn resolve_line_scope(query: &ChordQuery, buffer: &Buffer, buffer_name: &str) ->
             )
             .into());
         }
+    };
+
+    let line = match query.positional {
+        Positional::Next => {
+            let next = base_line + 1;
+            if next >= buffer.line_count() {
+                return Err(ChordError::resolve(
+                    buffer_name,
+                    format!(
+                        "no next line: cursor is on line {base_line} (file has {} lines)",
+                        buffer.line_count()
+                    ),
+                )
+                .into());
+            }
+            next
+        }
+        Positional::Previous => {
+            if base_line == 0 {
+                return Err(ChordError::resolve(
+                    buffer_name,
+                    "no previous line: cursor is already on line 0",
+                )
+                .into());
+            }
+            base_line - 1
+        }
+        _ => base_line,
     };
 
     if buffer.line_count() == 0 {
@@ -912,11 +940,17 @@ fn resolve_cursor_and_mode(
         }
         Action::Yank => (None, None),
         Action::Jump => {
-            let cursor = CursorPosition {
-                line: target_range.start_line,
-                col: target_range.start_col,
+            let cursor = match query.positional {
+                Positional::To | Positional::Until | Positional::Before => CursorPosition {
+                    line: target_range.end_line,
+                    col: target_range.end_col,
+                },
+                _ => CursorPosition {
+                    line: target_range.start_line,
+                    col: target_range.start_col,
+                },
             };
-            (Some(cursor), Some(EditorMode::Edit))
+            (Some(cursor), Some(EditorMode::Chord))
         }
     }
 }
@@ -1911,6 +1945,71 @@ mod tests {
         );
         let range = resolve_line_scope(&q, &buffer, "/buf").unwrap();
         assert_eq!(range.end_col, 11);
+    }
+
+    #[test]
+    fn line_scope_next_positional_resolves_next_line() {
+        let buffer = buf(&["first", "second", "third"]);
+        let q = query(
+            Action::Jump,
+            Positional::Next,
+            Scope::Line,
+            Component::End,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let range = resolve_line_scope(&q, &buffer, "/buf").unwrap();
+        assert_eq!(range.start_line, 1);
+        assert_eq!(range.end_line, 1);
+        assert_eq!(range.end_col, 6);
+    }
+
+    #[test]
+    fn line_scope_previous_positional_resolves_previous_line() {
+        let buffer = buf(&["first", "second", "third"]);
+        let q = query(
+            Action::Jump,
+            Positional::Previous,
+            Scope::Line,
+            Component::Beginning,
+            None,
+            None,
+            Some((2, 3)),
+        );
+        let range = resolve_line_scope(&q, &buffer, "/buf").unwrap();
+        assert_eq!(range.start_line, 1);
+        assert_eq!(range.end_line, 1);
+    }
+
+    #[test]
+    fn line_scope_next_at_last_line_errors() {
+        let buffer = buf(&["first", "second"]);
+        let q = query(
+            Action::Jump,
+            Positional::Next,
+            Scope::Line,
+            Component::End,
+            None,
+            None,
+            Some((1, 0)),
+        );
+        assert!(resolve_line_scope(&q, &buffer, "/buf").is_err());
+    }
+
+    #[test]
+    fn line_scope_previous_at_first_line_errors() {
+        let buffer = buf(&["first", "second"]);
+        let q = query(
+            Action::Jump,
+            Positional::Previous,
+            Scope::Line,
+            Component::Beginning,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        assert!(resolve_line_scope(&q, &buffer, "/buf").is_err());
     }
 
     // --- resolve_buffer_scope ---
@@ -3903,7 +4002,7 @@ mod tests {
         );
         let (cursor, mode) = resolve_cursor_and_mode(&q, &range);
         assert_eq!(cursor, Some(CursorPosition { line: 3, col: 7 }));
-        assert_eq!(mode, Some(EditorMode::Edit));
+        assert_eq!(mode, Some(EditorMode::Chord));
     }
 
     #[test]
@@ -3933,7 +4032,7 @@ mod tests {
             res.cursor_destination,
             Some(CursorPosition { line: 0, col: 3 })
         );
-        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+        assert_eq!(res.mode_after, Some(EditorMode::Chord));
     }
 
     #[test]
@@ -3984,7 +4083,7 @@ mod tests {
         let dest = res.cursor_destination.unwrap();
         assert_eq!(dest.line, 0);
         assert_eq!(dest.col, "// preamble line".chars().count());
-        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+        assert_eq!(res.mode_after, Some(EditorMode::Chord));
     }
 
     #[test]
@@ -4020,7 +4119,7 @@ mod tests {
         let dest = res.cursor_destination.unwrap();
         assert_eq!(dest.line, 4);
         assert_eq!(dest.col, 0);
-        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+        assert_eq!(res.mode_after, Some(EditorMode::Chord));
     }
 
     #[test]
@@ -4074,6 +4173,6 @@ mod tests {
             res.cursor_destination,
             Some(CursorPosition { line: 0, col: 3 })
         );
-        assert_eq!(res.mode_after, Some(EditorMode::Edit));
+        assert_eq!(res.mode_after, Some(EditorMode::Chord));
     }
 }

@@ -46,9 +46,15 @@ impl ApplyChordAction for TuiFrontend {
             let line_len = state
                 .current_buffer()
                 .and_then(|b| b.lines.get(state.cursor_line))
-                .map(|l| l.chars().count())
+                .map(|l| l.len())
                 .unwrap_or(0);
-            state.cursor_col = cursor.col.min(line_len);
+            let mut col = cursor.col.min(line_len);
+            if let Some(line) = state.current_buffer().and_then(|b| b.lines.get(state.cursor_line)) {
+                while col > 0 && !line.is_char_boundary(col) {
+                    col -= 1;
+                }
+            }
+            state.cursor_col = col;
         }
 
         if let Some(ref mode) = action.mode_after {
