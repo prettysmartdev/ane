@@ -30,8 +30,6 @@ impl FileTree {
         for entry in WalkDir::new(&root)
             .sort_by_file_name()
             .min_depth(1)
-            .into_iter()
-            .filter_entry(|e| !is_hidden(e))
         {
             let entry = entry?;
             let depth = entry.depth() - 1;
@@ -48,14 +46,6 @@ impl FileTree {
     pub fn files_only(&self) -> impl Iterator<Item = &FileEntry> {
         self.entries.iter().filter(|e| !e.is_dir)
     }
-}
-
-fn is_hidden(entry: &walkdir::DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -77,6 +67,6 @@ mod tests {
         assert!(names.contains(&"file.txt"));
         assert!(names.contains(&"sub"));
         assert!(names.contains(&"nested.rs"));
-        assert!(!names.contains(&".hidden"));
+        assert!(names.contains(&".hidden"));
     }
 }

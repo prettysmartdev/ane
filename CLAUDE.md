@@ -14,12 +14,6 @@ cargo clippy -- -D warnings
 cargo fmt --check
 ```
 
-No Rust toolchain is installed in this workspace. Use `Dockerfile.dev` to get a full dev environment:
-```bash
-docker build -f Dockerfile.dev -t ane-dev .
-docker run -it -v $(pwd):/workspace ane-dev
-```
-
 ## Architecture Rules (MUST follow)
 
 Three-layer architecture with strict dependency direction:
@@ -32,7 +26,7 @@ Lower layers NEVER depend on higher layers. Violating this is a build-breaking a
 
 ## Chord System
 
-Chords have 4 parts: **action** (c/d/r/i/m/s/y), **positional** (i/a/r/b/f), **scope** (f/v/b/l/F/s/m/e), **component** (b/n/s/p/t/v/a).
+Chords have 4 parts: **action**, **positional**, **scope**, **component**. Refer to the docs/ folder for comprehensive chord syntax and behaviour.
 
 - Short form: `cifb` = ChangeInFunctionBody
 - Long form: `ChangeInFunctionBody`
