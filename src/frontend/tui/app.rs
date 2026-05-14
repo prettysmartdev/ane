@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
@@ -18,7 +18,7 @@ use ratatui::{
 
 use crate::commands::chord_engine::{parens_balanced, ChordEngine};
 use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
-use crate::data::lsp::registry;
+use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
 use crate::data::state::{EditorState, Mode};
 
@@ -217,6 +217,37 @@ impl InstallProgress for TuiInstallProgress {
     }
 }
 
+/// TUI implementation of SyntaxFrontend — stores tokens per-path for the render loop.
+struct TuiSyntaxReceiver {
+    tokens: Arc<Mutex<HashMap<PathBuf, Vec<SemanticToken>>>>,
+}
+
+impl TuiSyntaxReceiver {
+    fn new() -> Self {
+        Self {
+            tokens: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn tokens_for(&self, path: &Path) -> Vec<SemanticToken> {
+        self.tokens
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+impl SyntaxFrontend for TuiSyntaxReceiver {
+    fn set_semantic_tokens(&self, path: &Path, tokens: Vec<SemanticToken>) {
+        self.tokens
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), tokens);
+    }
+}
+
 pub fn run(path: &Path) -> Result<()> {
     let mut state = if path.is_dir() {
         EditorState::for_directory(path)?
@@ -240,27 +271,27 @@ pub fn run(path: &Path) -> Result<()> {
         let _ = eng.start_for_context(&root, &files);
     }
 
-    let detected_lang = primary_language(path);
-    if let Some(lang) = detected_lang {
-        let eng = engine.lock().unwrap();
-        let server_state = eng.server_state(lang);
-        state.lsp_state.lock().unwrap().status = server_state;
+    // Create the syntax receiver (Layer 2's impl of SyntaxFrontend)
+    let syntax_receiver = Arc::new(TuiSyntaxReceiver::new());
+
+    // Create SyntaxEngine (Layer 1) — it owns the LspEngine reference
+    // and spawns its own background worker for debounced LSP requests
+    let mut syntax_engine = SyntaxEngine::new(
+        Arc::clone(&engine),
+        Arc::clone(&syntax_receiver) as Arc<dyn SyntaxFrontend>,
+    );
+
+    // Initial compute for the opened file
+    if let Some(buf) = state.current_buffer() {
+        syntax_engine.compute(&buf.path, &buf.content());
     }
 
-    let lsp_shared = Arc::clone(&state.lsp_state);
-    let (token_tx, token_rx) = std::sync::mpsc::sync_channel::<(std::path::PathBuf, String)>(1);
-
-    if let Some(lang) = detected_lang {
+    // Status polling thread — polls all server statuses
+    {
         let poll_engine = Arc::clone(&engine);
-        let poll_shared = Arc::clone(&lsp_shared);
+        let poll_shared = Arc::clone(&state.lsp_state);
         std::thread::spawn(move || {
-            status_polling_task(poll_engine, poll_shared, lang);
-        });
-
-        let tok_engine = Arc::clone(&engine);
-        let tok_shared = Arc::clone(&lsp_shared);
-        std::thread::spawn(move || {
-            token_request_task(tok_engine, tok_shared, token_rx);
+            status_polling_task(poll_engine, poll_shared);
         });
     }
 
@@ -270,7 +301,14 @@ pub fn run(path: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut frontend = TuiFrontend::new();
-    let result = event_loop(&mut terminal, &mut state, &mut frontend, &engine, &token_tx);
+    let result = event_loop(
+        &mut terminal,
+        &mut state,
+        &mut frontend,
+        &engine,
+        &mut syntax_engine,
+        &syntax_receiver,
+    );
 
     {
         let mut eng = engine.lock().unwrap();
@@ -282,27 +320,32 @@ pub fn run(path: &Path) -> Result<()> {
     result
 }
 
-fn status_polling_task(
-    engine: Arc<Mutex<LspEngine>>,
-    shared: Arc<Mutex<LspSharedState>>,
-    lang: Language,
-) {
+fn status_polling_task(engine: Arc<Mutex<LspEngine>>, shared: Arc<Mutex<LspSharedState>>) {
     loop {
-        let current = {
+        let summary = {
             let eng = engine.lock().unwrap();
-            eng.server_state(lang)
+            eng.status_summary()
         };
 
-        {
+        let all_terminal = {
             let mut s = shared.lock().unwrap();
-            s.status = current;
-        }
+            s.status.clear();
+            let mut all_terminal = !summary.is_empty();
+            for (lang, state) in &summary {
+                s.status.insert(*lang, *state);
+                if !state.is_terminal() {
+                    all_terminal = false;
+                }
+            }
+            all_terminal
+        };
 
-        if matches!(current, ServerState::Stopped | ServerState::Failed) {
+        if all_terminal && !summary.is_empty() {
             break;
         }
 
-        let interval = if current == ServerState::Running {
+        let any_running = summary.iter().any(|(_, s)| *s == ServerState::Running);
+        let interval = if any_running {
             Duration::from_secs(3)
         } else {
             Duration::from_secs(1)
@@ -311,67 +354,48 @@ fn status_polling_task(
     }
 }
 
-fn token_request_task(
-    engine: Arc<Mutex<LspEngine>>,
-    shared: Arc<Mutex<LspSharedState>>,
-    rx: std::sync::mpsc::Receiver<(std::path::PathBuf, String)>,
-) {
-    while let Ok((path, content)) = rx.recv() {
-        let tokens = {
-            let mut eng = engine.lock().unwrap();
-            eng.semantic_tokens(&path, &content).unwrap_or_default()
-        };
-        let mut s = shared.lock().unwrap();
-        s.semantic_tokens = tokens;
-    }
-}
-
-fn primary_language(path: &Path) -> Option<Language> {
-    let root = if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(Path::new(".")).to_path_buf()
-    };
-    registry::detect_language_from_dir(&root).or_else(|| registry::detect_language_from_path(path))
-}
-
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
     engine: &Arc<Mutex<LspEngine>>,
-    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
+    syntax_engine: &mut SyntaxEngine,
+    syntax_receiver: &Arc<TuiSyntaxReceiver>,
 ) -> Result<()> {
-    let mut last_edit: Option<Instant> = None;
+    let mut prev_lsp_statuses: Vec<(Language, ServerState)> = Vec::new();
 
     loop {
-        let (lsp_status, semantic_tokens) = {
+        let lsp_statuses: Vec<(Language, ServerState)> = {
             let s = state.lsp_state.lock().unwrap();
-            (s.status, s.semantic_tokens.clone())
+            s.status.iter().map(|(l, s)| (*l, *s)).collect()
+        };
+
+        // Detect if any LSP server just became Running
+        let lsp_became_ready = lsp_statuses.iter().any(|(lang, st)| {
+            *st == ServerState::Running
+                && !prev_lsp_statuses
+                    .iter()
+                    .any(|(l, s)| l == lang && *s == ServerState::Running)
+        });
+        if lsp_became_ready {
+            if let Some(buf) = state.current_buffer() {
+                syntax_engine.compute(&buf.path, &buf.content());
+            }
+        }
+        prev_lsp_statuses = lsp_statuses.clone();
+
+        // Read tokens from the syntax receiver
+        let tokens = if let Some(buf) = state.current_buffer() {
+            syntax_receiver.tokens_for(&buf.path)
+        } else {
+            vec![]
         };
 
         let term_size = terminal.size()?;
         adjust_scroll_offset(state, term_size.height, term_size.width);
 
-        if lsp_status == ServerState::Running && semantic_tokens.is_empty() {
-            if let Some(buf) = state.current_buffer() {
-                let _ = token_tx.try_send((buf.path.clone(), buf.content()));
-            }
-        }
-
-        if let Some(last) = last_edit {
-            if last.elapsed() >= Duration::from_millis(300) {
-                last_edit = None;
-                if lsp_status == ServerState::Running {
-                    if let Some(buf) = state.current_buffer() {
-                        let _ = token_tx.try_send((buf.path.clone(), buf.content()));
-                    }
-                }
-            }
-        }
-
         terminal.draw(|frame| {
-            draw(frame, state, &lsp_status, &semantic_tokens);
+            draw(frame, state, &tokens, &lsp_statuses);
         })?;
 
         if state.should_quit {
@@ -386,12 +410,14 @@ fn event_loop(
                     engine,
                     key.code,
                     key.modifiers,
-                    token_tx,
-                    lsp_status,
+                    syntax_engine,
+                    &lsp_statuses,
                     term_size.width,
                 );
                 if buffer_modified {
-                    last_edit = Some(Instant::now());
+                    if let Some(buf) = state.current_buffer() {
+                        syntax_engine.compute(&buf.path, &buf.content());
+                    }
                 }
             }
         }
@@ -463,14 +489,14 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
 fn draw(
     frame: &mut ratatui::Frame,
     state: &EditorState,
-    lsp_status: &ServerState,
-    semantic_tokens: &[SemanticToken],
+    tokens: &[SemanticToken],
+    lsp_statuses: &[(Language, ServerState)],
 ) {
     let has_tree = state.file_tree.is_some() && state.focus_tree;
 
     let h_constraints = if has_tree {
         let content_w = tree_pane::content_width(&state.tree_view) as u16;
-        let desired = content_w + 3; // +1 padding, +2 borders
+        let desired = content_w + 3;
         let max_w = frame.area().width / 2;
         let tree_w = desired.min(max_w);
         vec![Constraint::Length(tree_w), Constraint::Min(0)]
@@ -516,14 +542,8 @@ fn draw(
     } else {
         pane_area
     };
-    editor_pane::render(
-        frame,
-        editor_render_area,
-        state,
-        *lsp_status,
-        semantic_tokens,
-    );
-    status_bar::render(frame, status_area, state, *lsp_status);
+    editor_pane::render(frame, editor_render_area, state, tokens);
+    status_bar::render(frame, status_area, state, lsp_statuses);
 
     if chord_box_visible {
         chord_box::render(frame, pane_area, state);
@@ -543,8 +563,8 @@ fn handle_key(
     engine: &Arc<Mutex<LspEngine>>,
     code: KeyCode,
     modifiers: KeyModifiers,
-    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
-    lsp_status: ServerState,
+    syntax_engine: &mut SyntaxEngine,
+    lsp_statuses: &[(Language, ServerState)],
     term_width: u16,
 ) -> bool {
     // Priority 1: Exit modal
@@ -555,7 +575,7 @@ fn handle_key(
 
     // Priority 2: Open-confirm modal
     if state.pending_open_path.is_some() {
-        handle_open_modal(state, code, modifiers, token_tx);
+        handle_open_modal(state, code, modifiers, syntax_engine);
         return false;
     }
 
@@ -576,14 +596,21 @@ fn handle_key(
 
     // Priority 4: Tree focus
     if state.focus_tree {
-        handle_tree_keys(state, code, modifiers);
+        handle_tree_keys(state, code, modifiers, syntax_engine);
         return false;
     }
 
     // Priority 5: Chord mode
     if state.mode == Mode::Chord {
         return handle_chord_mode(
-            state, frontend, engine, code, modifiers, token_tx, lsp_status, term_width,
+            state,
+            frontend,
+            engine,
+            code,
+            modifiers,
+            syntax_engine,
+            lsp_statuses,
+            term_width,
         );
     }
 
@@ -613,7 +640,7 @@ fn handle_open_modal(
     state: &mut EditorState,
     code: KeyCode,
     modifiers: KeyModifiers,
-    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
+    syntax_engine: &mut SyntaxEngine,
 ) {
     match code {
         KeyCode::Char('s') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -622,9 +649,8 @@ fn handle_open_modal(
             }
             if let Some(path) = state.pending_open_path.take() {
                 let _ = state.open_file(&path);
-                state.lsp_state.lock().unwrap().semantic_tokens.clear();
                 if let Some(buf) = state.current_buffer() {
-                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                    syntax_engine.compute(&buf.path, &buf.content());
                 }
             }
         }
@@ -634,9 +660,8 @@ fn handle_open_modal(
                     buf.dirty = false;
                 }
                 let _ = state.open_file(&path);
-                state.lsp_state.lock().unwrap().semantic_tokens.clear();
                 if let Some(buf) = state.current_buffer() {
-                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
+                    syntax_engine.compute(&buf.path, &buf.content());
                 }
             }
         }
@@ -647,7 +672,12 @@ fn handle_open_modal(
     }
 }
 
-fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
+fn handle_tree_keys(
+    state: &mut EditorState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    syntax_engine: &mut SyntaxEngine,
+) {
     match code {
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
@@ -708,7 +738,9 @@ fn handle_tree_keys(state: &mut EditorState, code: KeyCode, modifiers: KeyModifi
                     state.pending_open_path = Some(path);
                 } else {
                     let _ = state.open_file(&path);
-                    state.lsp_state.lock().unwrap().semantic_tokens.clear();
+                    if let Some(buf) = state.current_buffer() {
+                        syntax_engine.compute(&buf.path, &buf.content());
+                    }
                 }
             }
         }
@@ -723,8 +755,8 @@ fn handle_chord_mode(
     engine: &Arc<Mutex<LspEngine>>,
     code: KeyCode,
     modifiers: KeyModifiers,
-    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
-    lsp_status: ServerState,
+    syntax_engine: &mut SyntaxEngine,
+    lsp_statuses: &[(Language, ServerState)],
     term_width: u16,
 ) -> bool {
     match code {
@@ -773,7 +805,7 @@ fn handle_chord_mode(
             match ChordEngine::parse(&input) {
                 Ok(_) => {
                     clear_chord(state);
-                    execute_chord_input(state, frontend, engine, &input, lsp_status);
+                    execute_chord_input(state, frontend, engine, &input, lsp_statuses);
                     if !state.status_msg.starts_with("error:")
                         && !state.status_msg.starts_with("resolve error:")
                         && !state.status_msg.starts_with("patch error:")
@@ -781,10 +813,8 @@ fn handle_chord_mode(
                     {
                         state.chord_history.push(input.clone());
                     }
-                    if lsp_status == ServerState::Running {
-                        if let Some(buf) = state.current_buffer() {
-                            let _ = token_tx.try_send((buf.path.clone(), buf.content()));
-                        }
+                    if let Some(buf) = state.current_buffer() {
+                        syntax_engine.compute(&buf.path, &buf.content());
                     }
                 }
                 Err(_) => {
@@ -799,7 +829,7 @@ fn handle_chord_mode(
             state.chord_cursor_col = col - 1;
             state.chord_error = false;
             state.chord_history_index = None;
-            try_auto_submit(state, frontend, engine, token_tx, lsp_status);
+            try_auto_submit(state, frontend, engine, syntax_engine, lsp_statuses);
         }
         KeyCode::Esc => {
             clear_chord(state);
@@ -811,7 +841,7 @@ fn handle_chord_mode(
             state.chord_cursor_col = col + 1;
             state.chord_error = false;
             state.chord_history_index = None;
-            try_auto_submit(state, frontend, engine, token_tx, lsp_status);
+            try_auto_submit(state, frontend, engine, syntax_engine, lsp_statuses);
         }
         _ => {}
     }
@@ -822,8 +852,8 @@ fn try_auto_submit(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
     engine: &Arc<Mutex<LspEngine>>,
-    token_tx: &std::sync::mpsc::SyncSender<(std::path::PathBuf, String)>,
-    lsp_status: ServerState,
+    syntax_engine: &mut SyntaxEngine,
+    lsp_statuses: &[(Language, ServerState)],
 ) {
     let input = &state.chord_input;
 
@@ -834,7 +864,7 @@ fn try_auto_submit(
             let input_clone = state.chord_input.clone();
             state.chord_running = true;
             clear_chord(state);
-            execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+            execute_chord_input(state, frontend, engine, &input_clone, lsp_statuses);
             if !state.status_msg.starts_with("error:")
                 && !state.status_msg.starts_with("resolve error:")
                 && !state.status_msg.starts_with("patch error:")
@@ -843,10 +873,8 @@ fn try_auto_submit(
                 state.chord_history.push(input_clone);
             }
             state.chord_running = false;
-            if lsp_status == ServerState::Running {
-                if let Some(buf) = state.current_buffer() {
-                    let _ = token_tx.try_send((buf.path.clone(), buf.content()));
-                }
+            if let Some(buf) = state.current_buffer() {
+                syntax_engine.compute(&buf.path, &buf.content());
             }
         }
     } else if input.ends_with(')')
@@ -857,7 +885,7 @@ fn try_auto_submit(
         let input_clone = state.chord_input.clone();
         state.chord_running = true;
         clear_chord(state);
-        execute_chord_input(state, frontend, engine, &input_clone, lsp_status);
+        execute_chord_input(state, frontend, engine, &input_clone, lsp_statuses);
         if !state.status_msg.starts_with("error:")
             && !state.status_msg.starts_with("resolve error:")
             && !state.status_msg.starts_with("patch error:")
@@ -866,10 +894,8 @@ fn try_auto_submit(
             state.chord_history.push(input_clone);
         }
         state.chord_running = false;
-        if lsp_status == ServerState::Running {
-            if let Some(buf) = state.current_buffer() {
-                let _ = token_tx.try_send((buf.path.clone(), buf.content()));
-            }
+        if let Some(buf) = state.current_buffer() {
+            syntax_engine.compute(&buf.path, &buf.content());
         }
     }
 }
@@ -1048,8 +1074,11 @@ fn execute_chord_input(
     frontend: &mut TuiFrontend,
     engine: &Arc<Mutex<LspEngine>>,
     input: &str,
-    lsp_status: ServerState,
+    lsp_statuses: &[(Language, ServerState)],
 ) {
+    // Determine the effective LSP status for the current file's language
+    let lsp_status = current_file_lsp_status(state, lsp_statuses);
+
     match ChordEngine::parse(input) {
         Ok(mut query) => {
             if query.requires_lsp && !lsp_status.is_available() {
@@ -1113,12 +1142,118 @@ fn execute_chord_input(
     }
 }
 
+fn current_file_lsp_status(
+    state: &EditorState,
+    lsp_statuses: &[(Language, ServerState)],
+) -> ServerState {
+    if let Some(buf) = state.current_buffer() {
+        if let Some(lang) = Language::from_path(&buf.path) {
+            for (l, s) in lsp_statuses {
+                if *l == lang {
+                    return *s;
+                }
+            }
+        }
+    }
+    ServerState::Undetected
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
+    use crate::commands::syntax_engine::SyntaxEngine;
+    use crate::data::lsp::types::SemanticToken;
     use crate::data::state::EditorState;
+
+    fn tok(line: usize, start_col: usize, length: usize, token_type: &str) -> SemanticToken {
+        SemanticToken {
+            line,
+            start_col,
+            length,
+            token_type: token_type.to_string(),
+        }
+    }
+
+    #[test]
+    fn tui_syntax_receiver_set_and_get_tokens() {
+        let receiver = TuiSyntaxReceiver::new();
+        let path = std::path::Path::new("/tmp/test.rs");
+        let tokens = vec![tok(0, 0, 2, "keyword"), tok(0, 3, 4, "function")];
+        receiver.set_semantic_tokens(path, tokens);
+        let got = receiver.tokens_for(path);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].token_type, "keyword");
+        assert_eq!(got[1].token_type, "function");
+    }
+
+    #[test]
+    fn tui_syntax_receiver_per_path_isolation() {
+        let receiver = TuiSyntaxReceiver::new();
+        let path_a = std::path::Path::new("/tmp/a.rs");
+        let path_b = std::path::Path::new("/tmp/b.ts");
+
+        receiver.set_semantic_tokens(path_a, vec![tok(0, 0, 3, "keyword")]);
+        receiver.set_semantic_tokens(path_b, vec![tok(1, 5, 4, "string")]);
+
+        let got_a = receiver.tokens_for(path_a);
+        let got_b = receiver.tokens_for(path_b);
+
+        assert_eq!(got_a.len(), 1);
+        assert_eq!(got_a[0].token_type, "keyword");
+        assert_eq!(got_b.len(), 1);
+        assert_eq!(got_b[0].token_type, "string");
+        // cross-check isolation
+        assert!(receiver
+            .tokens_for(std::path::Path::new("/tmp/c.go"))
+            .is_empty());
+    }
+
+    #[test]
+    fn lsp_readiness_triggers_merged_token_delivery() {
+        // Simulate: first compute delivers ts-only; after LSP "becomes ready"
+        // (worker caches tokens), second compute delivers merged ts+LSP tokens.
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let path = PathBuf::from("lsp_ready_integration.rs");
+
+        let mut lsp = LspEngine::new(LspEngineConfig::default());
+        // Inject a fake LSP token that partially overlaps with the ts "fn" keyword
+        lsp.inject_test_semantic_tokens(path.clone(), vec![tok(0, 0, 2, "keyword")]);
+        let engine = Arc::new(Mutex::new(lsp));
+
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+
+        // First compute: LSP cache is empty — delivers tree-sitter tokens only
+        syntax.compute(path.as_path(), "fn main() {}");
+        let first = receiver.tokens_for(path.as_path());
+        assert!(
+            !first.is_empty(),
+            "tree-sitter tokens should be delivered on first compute"
+        );
+
+        // Wait for the background worker to run, call semantic_tokens (returns
+        // injected tokens), and populate lsp_cache
+        std::thread::sleep(std::time::Duration::from_millis(600));
+
+        // Second compute: LSP cache is now populated — merged delivery fires synchronously
+        syntax.compute(path.as_path(), "fn main() {}");
+
+        let second = receiver.tokens_for(path.as_path());
+        assert!(
+            second
+                .iter()
+                .any(|t| t.line == 0 && t.start_col == 0 && t.length == 2),
+            "merged delivery should include LSP token at (0,0,2); got: {:?}",
+            second
+        );
+    }
 
     fn make_state_with_lines(lines: &[&str]) -> (tempfile::NamedTempFile, EditorState) {
         let mut f = tempfile::NamedTempFile::new().unwrap();
@@ -1137,8 +1272,6 @@ mod tests {
 
     #[test]
     fn adjust_scroll_offset_scrolls_down_when_cursor_below_viewport() {
-        // Chord mode, no tree: chord_box_rows=4, visible=20-2-4=14
-        // cursor_line=15 >= scroll_offset(0)+14 → scroll_offset = 15+1-14 = 2
         let lines: Vec<&str> = (0..30).map(|_| "line").collect();
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 0;
@@ -1149,7 +1282,6 @@ mod tests {
 
     #[test]
     fn adjust_scroll_offset_scrolls_up_when_cursor_above_scroll() {
-        // cursor_line=3 < scroll_offset=10 → scroll_offset = 3
         let lines: Vec<&str> = (0..30).map(|_| "line").collect();
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 10;
@@ -1160,7 +1292,6 @@ mod tests {
 
     #[test]
     fn adjust_scroll_offset_no_change_when_cursor_in_viewport() {
-        // cursor_line=5, scroll_offset=0, visible=14 → 5 in [0,14) → no change
         let lines: Vec<&str> = (0..30).map(|_| "line").collect();
         let (_f, mut state) = make_state_with_lines(&lines);
         state.scroll_offset = 0;

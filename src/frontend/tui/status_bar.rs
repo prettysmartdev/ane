@@ -6,19 +6,24 @@ use ratatui::{
     Frame,
 };
 
-use crate::data::lsp::types::{InstallLine, ServerState};
+use crate::data::lsp::types::{InstallLine, Language, ServerState};
 use crate::data::state::EditorState;
 
-pub fn render(frame: &mut Frame, area: Rect, state: &EditorState, lsp_status: ServerState) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &EditorState,
+    lsp_statuses: &[(Language, ServerState)],
+) {
     let install_line = state.lsp_state.lock().unwrap().install_line.clone();
-    render_inner(frame, area, state, lsp_status, install_line.as_ref());
+    render_inner(frame, area, state, lsp_statuses, install_line.as_ref());
 }
 
 fn render_inner(
     frame: &mut Frame,
     area: Rect,
     state: &EditorState,
-    lsp_status: ServerState,
+    lsp_statuses: &[(Language, ServerState)],
     install_line: Option<&InstallLine>,
 ) {
     let width = area.width as usize;
@@ -36,16 +41,10 @@ fn render_inner(
             .add_modifier(Modifier::BOLD),
     );
 
-    let lsp_color = match lsp_status {
-        ServerState::Running => Color::Green,
-        ServerState::Failed | ServerState::Missing => Color::Red,
-        ServerState::Installing | ServerState::Starting | ServerState::Available => Color::Yellow,
-        ServerState::Undetected | ServerState::Stopped => Color::DarkGray,
-    };
-    let lsp_text = format!(" {} ", lsp_status.display());
-    let lsp_span = Span::styled(lsp_text.clone(), Style::default().fg(lsp_color));
+    let lsp_spans = build_lsp_indicator_spans(lsp_statuses);
+    let lsp_char_len: usize = lsp_spans.iter().map(|s| s.content.chars().count()).sum();
 
-    let fixed_len = mode_text.len() + lsp_text.len();
+    let fixed_len = mode_text.len() + lsp_char_len;
     let available = width.saturating_sub(fixed_len);
 
     let (msg_text, msg_color) = if let Some(il) = install_line {
@@ -80,7 +79,45 @@ fn render_inner(
         )
     };
 
-    let line = Line::from(vec![mode_span, msg_span, pad_span, lsp_span]);
+    let mut spans = vec![mode_span, msg_span, pad_span];
+    spans.extend(lsp_spans);
+    let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
+}
+
+fn build_lsp_indicator_spans(statuses: &[(Language, ServerState)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut first = true;
+
+    for (lang, state) in statuses {
+        if matches!(state, ServerState::Undetected | ServerState::Stopped) {
+            continue;
+        }
+        let (indicator, color) = match state {
+            ServerState::Running => ("\u{25cf}", Color::Green),
+            ServerState::Installing | ServerState::Starting | ServerState::Available => {
+                ("\u{25cc}", Color::Yellow)
+            }
+            ServerState::Failed | ServerState::Missing => ("\u{2716}", Color::Red),
+            _ => continue,
+        };
+
+        if first {
+            spans.push(Span::raw(" "));
+            first = false;
+        } else {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("{}:{}", lang.short_name(), indicator),
+            Style::default().fg(color),
+        ));
+    }
+
+    if !spans.is_empty() {
+        spans.push(Span::raw(" "));
+    }
+
+    spans
 }

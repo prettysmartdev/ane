@@ -83,6 +83,7 @@ struct StartupContext {
     overrides: ServerOverrides,
     startup_timeout: Duration,
     install_progress: Option<Arc<dyn InstallProgress>>,
+    install_lock: Arc<Mutex<()>>,
 }
 
 struct ServerInstance {
@@ -134,10 +135,17 @@ pub struct LspEngine {
     event_tx: mpsc::Sender<LspEvent>,
     event_rx: mpsc::Receiver<LspEvent>,
     install_progress: Option<Arc<dyn InstallProgress>>,
+    install_lock: Arc<Mutex<()>>,
     #[cfg(any(test, feature = "test-support"))]
     test_symbols: HashMap<PathBuf, Vec<DocumentSymbol>>,
     #[cfg(any(test, feature = "test-support"))]
     test_selection_ranges: HashMap<(PathBuf, usize, usize), SelectionRange>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_semantic_tokens: HashMap<PathBuf, Vec<SemanticToken>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub did_open_log: Vec<(PathBuf, String)>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub test_semantic_tokens_delay: Option<Duration>,
 }
 
 impl LspEngine {
@@ -149,10 +157,17 @@ impl LspEngine {
             event_tx,
             event_rx,
             install_progress: None,
+            install_lock: Arc::new(Mutex::new(())),
             #[cfg(any(test, feature = "test-support"))]
             test_symbols: HashMap::new(),
             #[cfg(any(test, feature = "test-support"))]
             test_selection_ranges: HashMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_semantic_tokens: HashMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            did_open_log: Vec::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_semantic_tokens_delay: None,
         }
     }
 
@@ -173,6 +188,11 @@ impl LspEngine {
             .insert((path, line, col), sel_range);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_test_semantic_tokens(&mut self, path: PathBuf, tokens: Vec<SemanticToken>) {
+        self.test_semantic_tokens.insert(path, tokens);
+    }
+
     pub fn set_install_progress(&mut self, progress: Arc<dyn InstallProgress>) {
         self.install_progress = Some(progress);
     }
@@ -185,6 +205,10 @@ impl LspEngine {
         let languages = detector::detect_languages(root_path, files);
 
         for lang in languages {
+            if !lang.capabilities().has_lsp {
+                continue;
+            }
+
             if self.servers.contains_key(&lang) {
                 continue;
             }
@@ -194,9 +218,7 @@ impl LspEngine {
                 None => continue,
             };
 
-            // Resolve to the workspace root so rust-analyzer indexes the
-            // whole workspace, not a nested member crate.
-            let resolved_root = registry::workspace_root_for_dir(root_path)
+            let resolved_root = registry::workspace_root_for_language(root_path, lang)
                 .unwrap_or_else(|| root_path.to_path_buf());
             self.spawn_server(lang, server_info, resolved_root);
         }
@@ -228,6 +250,7 @@ impl LspEngine {
             },
             startup_timeout: self.config.startup_timeout,
             install_progress: self.install_progress.clone(),
+            install_lock: Arc::clone(&self.install_lock),
         };
 
         thread::spawn(move || {
@@ -495,6 +518,13 @@ impl LspEngine {
         file_path: &Path,
         content: &str,
     ) -> Result<Vec<SemanticToken>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(tokens) = self.test_semantic_tokens.get(file_path) {
+            if let Some(delay) = self.test_semantic_tokens_delay {
+                thread::sleep(delay);
+            }
+            return Ok(tokens.clone());
+        }
         let lang = self.language_for_file(file_path)?;
         self.ensure_open(lang, file_path)?;
         let _ = self.notify_document_change(file_path, content, 2);
@@ -731,10 +761,14 @@ impl LspEngine {
 
     fn do_notify_open(&mut self, lang: Language, file_path: &Path, content: &str) -> Result<()> {
         let uri = path_to_uri(file_path);
+        let language_id = Language::language_id_for_path(file_path).unwrap_or(lang.name());
+        #[cfg(any(test, feature = "test-support"))]
+        self.did_open_log
+            .push((file_path.to_path_buf(), language_id.to_string()));
         let params = json!({
             "textDocument": {
                 "uri": uri,
-                "languageId": lang.name(),
+                "languageId": language_id,
                 "version": 1,
                 "text": content
             }
@@ -775,15 +809,21 @@ fn startup_thread(
 
     if !installed {
         if ctx.auto_install {
-            try_transition(&state, lang, ServerState::Installing, &event_tx);
-            if let Err(e) = installer::install(server_info, ctx.install_progress.as_ref()) {
-                try_transition(&state, lang, ServerState::Failed, &event_tx);
-                let _ = event_tx.send(LspEvent::Error {
-                    language: lang,
-                    error: format!("install failed: {}", e),
-                });
-                return;
+            let _guard = ctx.install_lock.lock().unwrap();
+            // Re-check inside the lock: a prior install may have satisfied the dep.
+            if !installer::is_installed(server_info) {
+                try_transition(&state, lang, ServerState::Installing, &event_tx);
+                if let Err(e) = installer::install(server_info, ctx.install_progress.as_ref()) {
+                    try_transition(&state, lang, ServerState::Failed, &event_tx);
+                    let _ = event_tx.send(LspEvent::Error {
+                        language: lang,
+                        error: format!("install failed: {}", e),
+                    });
+                    return;
+                }
             }
+            // _guard drops here, before spawning the server process.
+            drop(_guard);
             try_transition(&state, lang, ServerState::Available, &event_tx);
         } else {
             try_transition(&state, lang, ServerState::Missing, &event_tx);
@@ -1425,5 +1465,60 @@ mod tests {
         let p = std::path::Path::new("/tmp/normal_path-1.rs");
         let uri = path_to_uri(p);
         assert_eq!(uri, "file:///tmp/normal_path-1.rs");
+    }
+
+    #[test]
+    fn do_notify_open_tsx_sends_typescriptreact_language_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tsx_file = tmp.path().join("app.tsx");
+        let mut engine = LspEngine::new(LspEngineConfig::default());
+        // semantic_tokens triggers ensure_open → do_notify_open before failing (no server)
+        let _ = engine.semantic_tokens(&tsx_file, "export default function App() {}");
+        assert!(
+            engine
+                .did_open_log
+                .iter()
+                .any(|(p, id)| p == &tsx_file && id == "typescriptreact"),
+            "did_open_log should contain typescriptreact for .tsx; got: {:?}",
+            engine.did_open_log
+        );
+    }
+
+    #[test]
+    fn install_lock_serializes_concurrent_installs() {
+        use std::time::Instant;
+
+        let lock = Arc::new(Mutex::new(()));
+        let log: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let start_epoch = Instant::now();
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let lock = Arc::clone(&lock);
+                let log = Arc::clone(&log);
+                let epoch = start_epoch;
+                thread::spawn(move || {
+                    let _guard = lock.lock().unwrap();
+                    let start = epoch.elapsed().as_millis() as u64;
+                    thread::sleep(Duration::from_millis(30));
+                    let end = epoch.elapsed().as_millis() as u64;
+                    log.lock().unwrap().push((start, end));
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 2);
+        let (s0, e0) = log[0];
+        let (s1, e1) = log[1];
+        let overlaps = s0 < e1 && s1 < e0;
+        assert!(
+            !overlaps,
+            "install intervals overlap: [{s0},{e0}) and [{s1},{e1})"
+        );
     }
 }

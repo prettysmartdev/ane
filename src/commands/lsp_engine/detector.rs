@@ -4,13 +4,7 @@ use crate::data::lsp::registry;
 use crate::data::lsp::types::Language;
 
 pub fn detect_languages(root_path: &Path, files: &[&Path]) -> Vec<Language> {
-    let mut langs = Vec::new();
-
-    if let Some(lang) = registry::detect_language_from_dir(root_path) {
-        if !langs.contains(&lang) {
-            langs.push(lang);
-        }
-    }
+    let mut langs = registry::detect_languages_from_dir(root_path);
 
     for file in files {
         if let Some(lang) = registry::detect_language_from_path(file) {
@@ -59,8 +53,29 @@ mod tests {
     }
 
     #[test]
+    fn detects_python_from_py_extension() {
+        let files = [Path::new("main.py")];
+        let langs = detect_languages(Path::new("/tmp"), &files);
+        assert!(langs.contains(&Language::Python));
+    }
+
+    #[test]
+    fn detects_go_from_go_extension() {
+        let files = [Path::new("main.go")];
+        let langs = detect_languages(Path::new("/tmp"), &files);
+        assert!(langs.contains(&Language::Go));
+    }
+
+    #[test]
+    fn detects_markdown_from_md_extension() {
+        let files = [Path::new("README.md")];
+        let langs = detect_languages(Path::new("/tmp"), &files);
+        assert!(langs.contains(&Language::Markdown));
+    }
+
+    #[test]
     fn unknown_extensions_produce_no_languages() {
-        let files = [Path::new("README.md"), Path::new("config.json")];
+        let files = [Path::new("config.json"), Path::new("data.csv")];
         let langs = detect_languages(Path::new("/tmp"), &files);
         assert!(langs.is_empty());
     }
@@ -68,13 +83,6 @@ mod tests {
     #[test]
     fn empty_inputs_produce_no_languages() {
         let langs = detect_languages(Path::new("/tmp"), &[]);
-        assert!(langs.is_empty());
-    }
-
-    #[test]
-    fn non_rs_file_in_non_cargo_dir_produces_nothing() {
-        let files = [Path::new("main.py")];
-        let langs = detect_languages(Path::new("/tmp"), &files);
         assert!(langs.is_empty());
     }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,19 +68,92 @@ impl ServerState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Rust,
+    Go,
+    TypeScript,
+    Python,
+    Markdown,
+}
+
+pub struct LanguageCapabilities {
+    pub has_tree_sitter: bool,
+    pub has_lsp: bool,
 }
 
 impl Language {
+    pub fn capabilities(self) -> LanguageCapabilities {
+        match self {
+            Language::Rust => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: true,
+            },
+            Language::Go => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: true,
+            },
+            Language::TypeScript => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: true,
+            },
+            Language::Python => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: true,
+            },
+            Language::Markdown => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
+        }
+    }
+
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "rs" => Some(Self::Rust),
+            "go" => Some(Self::Go),
+            "ts" | "tsx" | "js" | "jsx" => Some(Self::TypeScript),
+            "py" => Some(Self::Python),
+            "md" | "markdown" => Some(Self::Markdown),
             _ => None,
         }
+    }
+
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Self::from_extension)
+    }
+
+    pub fn language_id_for_path(path: &std::path::Path) -> Option<&'static str> {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .and_then(|ext| match ext {
+                "rs" => Some("rust"),
+                "go" => Some("go"),
+                "ts" => Some("typescript"),
+                "tsx" => Some("typescriptreact"),
+                "js" => Some("javascript"),
+                "jsx" => Some("javascriptreact"),
+                "py" => Some("python"),
+                _ => None,
+            })
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             Self::Rust => "rust",
+            Self::Go => "go",
+            Self::TypeScript => "typescript",
+            Self::Python => "python",
+            Self::Markdown => "markdown",
+        }
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::Rust => "rs",
+            Self::Go => "go",
+            Self::TypeScript => "ts",
+            Self::Python => "py",
+            Self::Markdown => "md",
         }
     }
 }
@@ -190,21 +264,10 @@ pub enum InstallLine {
     Failed(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct LspSharedState {
-    pub status: ServerState,
-    pub semantic_tokens: Vec<SemanticToken>,
+    pub status: HashMap<Language, ServerState>,
     pub install_line: Option<InstallLine>,
-}
-
-impl Default for LspSharedState {
-    fn default() -> Self {
-        Self {
-            status: ServerState::Undetected,
-            semantic_tokens: Vec::new(),
-            install_line: None,
-        }
-    }
 }
 
 pub struct LspServerInfo {
@@ -222,15 +285,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn language_capabilities_all_variants() {
+        let rust = Language::Rust.capabilities();
+        assert!(rust.has_tree_sitter);
+        assert!(rust.has_lsp);
+
+        let go = Language::Go.capabilities();
+        assert!(go.has_tree_sitter);
+        assert!(go.has_lsp);
+
+        let ts = Language::TypeScript.capabilities();
+        assert!(ts.has_tree_sitter);
+        assert!(ts.has_lsp);
+
+        let py = Language::Python.capabilities();
+        assert!(py.has_tree_sitter);
+        assert!(py.has_lsp);
+
+        let md = Language::Markdown.capabilities();
+        assert!(md.has_tree_sitter);
+        assert!(!md.has_lsp, "Markdown has no LSP server");
+    }
+
+    #[test]
+    fn language_from_extension_work_item_cases() {
+        assert_eq!(Language::from_extension("md"), Some(Language::Markdown));
+        assert_eq!(
+            Language::from_extension("markdown"),
+            Some(Language::Markdown)
+        );
+        assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("go"), Some(Language::Go));
+        assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
+    }
+
+    #[test]
+    fn language_id_for_path_all_cases() {
+        use std::path::Path;
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.tsx")),
+            Some("typescriptreact")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.jsx")),
+            Some("javascriptreact")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.ts")),
+            Some("typescript")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.js")),
+            Some("javascript")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.rs")),
+            Some("rust")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.go")),
+            Some("go")
+        );
+        assert_eq!(
+            Language::language_id_for_path(Path::new("foo.py")),
+            Some("python")
+        );
+        // Markdown has no LSP languageId
+        assert_eq!(Language::language_id_for_path(Path::new("foo.md")), None);
+    }
+
+    #[test]
     fn language_detection() {
         assert_eq!(Language::from_extension("rs"), Some(Language::Rust));
-        assert_eq!(Language::from_extension("py"), None);
+        assert_eq!(Language::from_extension("go"), Some(Language::Go));
+        assert_eq!(Language::from_extension("ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("tsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("js"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("jsx"), Some(Language::TypeScript));
+        assert_eq!(Language::from_extension("py"), Some(Language::Python));
+        assert_eq!(Language::from_extension("md"), Some(Language::Markdown));
+        assert_eq!(
+            Language::from_extension("markdown"),
+            Some(Language::Markdown)
+        );
         assert_eq!(Language::from_extension(""), None);
+        assert_eq!(Language::from_extension("txt"), None);
     }
 
     #[test]
     fn language_name() {
         assert_eq!(Language::Rust.name(), "rust");
+        assert_eq!(Language::Go.name(), "go");
+        assert_eq!(Language::TypeScript.name(), "typescript");
+        assert_eq!(Language::Python.name(), "python");
+        assert_eq!(Language::Markdown.name(), "markdown");
     }
 
     #[test]
