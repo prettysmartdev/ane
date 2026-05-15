@@ -27,7 +27,7 @@ The installer detects your platform and puts `ane` on your `PATH`.
 **With cargo:**
 
 ```sh
-cargo install ane
+cargo install ane-editor
 ```
 
 **With mise** — using the [GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
@@ -173,7 +173,7 @@ ane's chord engine, LSP engine, and buffer management are available as a Rust li
 
 ```toml
 [dependencies]
-ane = { version = "0.1", default-features = false }
+ane-editor = { version = "0.1", default-features = false }
 ```
 
 ```rust

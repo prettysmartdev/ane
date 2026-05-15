@@ -59,7 +59,7 @@ The installer detects your platform and puts `ane` on your `PATH`.
 **With cargo:**
 
 ```sh
-cargo install ane
+cargo install ane-editor
 ```
 
 **With mise** -- using the [GitHub backend](https://mise.jdx.dev/dev-tools/backends/github.html):
@@ -148,7 +148,7 @@ If you're building a code agent or custom tooling, you can use ane as a Rust cra
 
 ```toml
 [dependencies]
-ane = { version = "0.1", default-features = false }
+ane-editor = { version = "0.1", default-features = false }
 ```
 
 This gives you the chord engine, LSP engine, buffer management, and a tool definition for LLM integration -- without pulling in `clap`, `crossterm`, or `ratatui`.

@@ -8,7 +8,7 @@ ane exposes its chord engine, LSP engine, and buffer management as a Rust crate.
 
 ```toml
 [dependencies]
-ane = { version = "0.1", default-features = false }
+ane-editor = { version = "0.1", default-features = false }
 ```
 
 The `frontends` feature (enabled by default) gates `clap`, `crossterm`, and `ratatui`. Disabling it drops ~30 transitive crates and gives you a minimal library with just the editing core.
