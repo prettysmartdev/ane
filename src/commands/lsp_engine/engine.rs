@@ -561,18 +561,18 @@ impl LspEngine {
     // --- Internal Methods ---
 
     fn try_recv_startup(&mut self, lang: Language) {
-        if let Some(server) = self.servers.get_mut(&lang) {
-            if let Some(ref rx) = server.startup_rx {
-                match rx.try_recv() {
-                    Ok(transport) => {
-                        server.transport = Some(transport);
-                        server.startup_rx = None;
-                    }
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        server.startup_rx = None;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => {}
+        if let Some(server) = self.servers.get_mut(&lang)
+            && let Some(ref rx) = server.startup_rx
+        {
+            match rx.try_recv() {
+                Ok(transport) => {
+                    server.transport = Some(transport);
+                    server.startup_rx = None;
                 }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    server.startup_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
             }
         }
     }
@@ -1225,7 +1225,7 @@ fn parse_semantic_tokens(value: &Value) -> Result<Vec<SemanticToken>> {
         .filter_map(|v| v.as_u64().map(|n| n as usize))
         .collect();
 
-    if nums.len() % 5 != 0 {
+    if !nums.len().is_multiple_of(5) {
         return Ok(Vec::new());
     }
 

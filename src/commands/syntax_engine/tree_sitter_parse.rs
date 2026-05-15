@@ -53,10 +53,10 @@ fn walk_tree(
         let node = cursor.node();
         let kind = node.kind();
 
-        if let Some(token_type) = map_fn(kind) {
-            if node.child_count() == 0 || is_leaf_like(kind) {
-                emit_tokens_for_node(&node, content, token_type, tokens);
-            }
+        if let Some(token_type) = map_fn(kind)
+            && (node.child_count() == 0 || is_leaf_like(kind))
+        {
+            emit_tokens_for_node(&node, content, token_type, tokens);
         }
 
         if !is_leaf_like(kind) && cursor.goto_first_child() {

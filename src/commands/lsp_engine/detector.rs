@@ -7,10 +7,10 @@ pub fn detect_languages(root_path: &Path, files: &[&Path]) -> Vec<Language> {
     let mut langs = registry::detect_languages_from_dir(root_path);
 
     for file in files {
-        if let Some(lang) = registry::detect_language_from_path(file) {
-            if !langs.contains(&lang) {
-                langs.push(lang);
-            }
+        if let Some(lang) = registry::detect_language_from_path(file)
+            && !langs.contains(&lang)
+        {
+            langs.push(lang);
         }
     }
 

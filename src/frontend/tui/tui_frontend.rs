@@ -28,16 +28,16 @@ impl FrontendCapabilities for TuiFrontend {
 
 impl ApplyChordAction for TuiFrontend {
     fn apply(&mut self, state: &mut EditorState, action: &ChordAction) -> Result<String> {
-        if let Some(ref diff) = action.diff {
-            if let Some(buf) = state.current_buffer_mut() {
-                let new_lines: Vec<String> = diff.modified.lines().map(String::from).collect();
-                buf.lines = if new_lines.is_empty() {
-                    vec![String::new()]
-                } else {
-                    new_lines
-                };
-                buf.dirty = true;
-            }
+        if let Some(ref diff) = action.diff
+            && let Some(buf) = state.current_buffer_mut()
+        {
+            let new_lines: Vec<String> = diff.modified.lines().map(String::from).collect();
+            buf.lines = if new_lines.is_empty() {
+                vec![String::new()]
+            } else {
+                new_lines
+            };
+            buf.dirty = true;
         }
 
         if let Some(ref cursor) = action.cursor_destination {

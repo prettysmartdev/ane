@@ -94,15 +94,15 @@ pub(crate) fn wrap_offsets(line: &str, text_width: usize) -> Vec<usize> {
         col += 1;
 
         if col >= text_width && i + 1 < chars.len() {
-            if let Some(sp) = last_space {
-                if sp > row_start {
-                    let break_at = sp + 1;
-                    offsets.push(break_at);
-                    row_start = break_at;
-                    col = (i + 1) - break_at;
-                    last_space = None;
-                    continue;
-                }
+            if let Some(sp) = last_space
+                && sp > row_start
+            {
+                let break_at = sp + 1;
+                offsets.push(break_at);
+                row_start = break_at;
+                col = (i + 1) - break_at;
+                last_space = None;
+                continue;
             }
             let break_at = i + 1;
             offsets.push(break_at);
@@ -335,13 +335,13 @@ pub fn render(
                 if cursor_x < area.right() && cursor_y < area.bottom() {
                     if state.mode == Mode::Edit && !state.focus_tree {
                         frame.set_cursor_position(Position::new(cursor_x, cursor_y));
-                    } else if state.mode == Mode::Chord && !state.focus_tree {
-                        if let Some(cell) = frame
+                    } else if state.mode == Mode::Chord
+                        && !state.focus_tree
+                        && let Some(cell) = frame
                             .buffer_mut()
                             .cell_mut(Position::new(cursor_x, cursor_y))
-                        {
-                            cell.set_style(Style::default().bg(Color::Blue).fg(Color::White));
-                        }
+                    {
+                        cell.set_style(Style::default().bg(Color::Blue).fg(Color::White));
                     }
                 }
             }

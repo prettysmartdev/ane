@@ -77,10 +77,10 @@ fn parse_args(raw_args: &Option<&str>) -> ChordArgs {
                     args.parent_name = Some(val.to_string());
                 }
                 "cursor" => {
-                    if let Some((l, c)) = val.split_once(',') {
-                        if let (Ok(line), Ok(col)) = (l.trim().parse(), c.trim().parse()) {
-                            args.cursor_pos = Some((line, col));
-                        }
+                    if let Some((l, c)) = val.split_once(',')
+                        && let (Ok(line), Ok(col)) = (l.trim().parse(), c.trim().parse())
+                    {
+                        args.cursor_pos = Some((line, col));
                     }
                 }
                 "value" => {

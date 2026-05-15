@@ -375,10 +375,8 @@ fn event_loop(
                     .iter()
                     .any(|(l, s)| l == lang && *s == ServerState::Running)
         });
-        if lsp_became_ready {
-            if let Some(buf) = state.current_buffer() {
-                syntax_engine.compute(&buf.path, &buf.content());
-            }
+        if lsp_became_ready && let Some(buf) = state.current_buffer() {
+            syntax_engine.compute(&buf.path, &buf.content());
         }
         prev_lsp_statuses = lsp_statuses.clone();
 
@@ -400,23 +398,21 @@ fn event_loop(
             return Ok(());
         }
 
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                let buffer_modified = handle_key(
-                    state,
-                    frontend,
-                    engine,
-                    key.code,
-                    key.modifiers,
-                    syntax_engine,
-                    &lsp_statuses,
-                    term_size.width,
-                );
-                if buffer_modified {
-                    if let Some(buf) = state.current_buffer() {
-                        syntax_engine.compute(&buf.path, &buf.content());
-                    }
-                }
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            let buffer_modified = handle_key(
+                state,
+                frontend,
+                engine,
+                key.code,
+                key.modifiers,
+                syntax_engine,
+                &lsp_statuses,
+                term_size.width,
+            );
+            if buffer_modified && let Some(buf) = state.current_buffer() {
+                syntax_engine.compute(&buf.path, &buf.content());
             }
         }
     }
@@ -715,15 +711,15 @@ fn handle_tree_keys(
             });
             if is_expanded_dir {
                 tree_pane::collapse(state, selected);
-            } else if let Some(depth) = state.tree_view.get(selected).map(|e| e.depth) {
-                if depth > 0 {
-                    let parent = (0..selected)
-                        .rev()
-                        .find(|&j| state.tree_view[j].is_dir && state.tree_view[j].depth < depth);
-                    if let Some(idx) = parent {
-                        state.tree_selected = idx;
-                        tree_pane::collapse(state, idx);
-                    }
+            } else if let Some(depth) = state.tree_view.get(selected).map(|e| e.depth)
+                && depth > 0
+            {
+                let parent = (0..selected)
+                    .rev()
+                    .find(|&j| state.tree_view[j].is_dir && state.tree_view[j].depth < depth);
+                if let Some(idx) = parent {
+                    state.tree_selected = idx;
+                    tree_pane::collapse(state, idx);
                 }
             }
         }
@@ -930,14 +926,14 @@ fn handle_edit_mode(
         KeyCode::Tab => {
             let line = state.cursor_line;
             let col = state.cursor_col;
-            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                if line < buf.lines.len() {
-                    let col = snap_to_char_boundary(&buf.lines[line], col);
-                    buf.lines[line].insert(col, '\t');
-                    buf.dirty = true;
-                    state.cursor_col = col + 1;
-                    modified = true;
-                }
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer)
+                && line < buf.lines.len()
+            {
+                let col = snap_to_char_boundary(&buf.lines[line], col);
+                buf.lines[line].insert(col, '\t');
+                buf.dirty = true;
+                state.cursor_col = col + 1;
+                modified = true;
             }
         }
         KeyCode::Up => {
@@ -957,14 +953,14 @@ fn handle_edit_mode(
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
             let line = state.cursor_line;
             let col = state.cursor_col;
-            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                if line < buf.lines.len() {
-                    let col = snap_to_char_boundary(&buf.lines[line], col);
-                    buf.lines[line].insert(col, c);
-                    buf.dirty = true;
-                    state.cursor_col = col + c.len_utf8();
-                    modified = true;
-                }
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer)
+                && line < buf.lines.len()
+            {
+                let col = snap_to_char_boundary(&buf.lines[line], col);
+                buf.lines[line].insert(col, c);
+                buf.dirty = true;
+                state.cursor_col = col + c.len_utf8();
+                modified = true;
             }
         }
         KeyCode::Backspace => {
@@ -997,17 +993,17 @@ fn handle_edit_mode(
         KeyCode::Enter => {
             let line = state.cursor_line;
             let col = state.cursor_col;
-            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                if line < buf.lines.len() {
-                    let current = buf.lines[line].clone();
-                    let col = snap_to_char_boundary(&current, col);
-                    let remainder = current[col..].to_string();
-                    buf.lines[line] = current[..col].to_string();
-                    buf.insert_line(line + 1, remainder);
-                    state.cursor_line += 1;
-                    state.cursor_col = 0;
-                    modified = true;
-                }
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer)
+                && line < buf.lines.len()
+            {
+                let current = buf.lines[line].clone();
+                let col = snap_to_char_boundary(&current, col);
+                let remainder = current[col..].to_string();
+                buf.lines[line] = current[..col].to_string();
+                buf.insert_line(line + 1, remainder);
+                state.cursor_line += 1;
+                state.cursor_col = 0;
+                modified = true;
             }
         }
         _ => {}
@@ -1144,12 +1140,12 @@ fn current_file_lsp_status(
     state: &EditorState,
     lsp_statuses: &[(Language, ServerState)],
 ) -> ServerState {
-    if let Some(buf) = state.current_buffer() {
-        if let Some(lang) = Language::from_path(&buf.path) {
-            for (l, s) in lsp_statuses {
-                if *l == lang {
-                    return *s;
-                }
+    if let Some(buf) = state.current_buffer()
+        && let Some(lang) = Language::from_path(&buf.path)
+    {
+        for (l, s) in lsp_statuses {
+            if *l == lang {
+                return *s;
             }
         }
     }

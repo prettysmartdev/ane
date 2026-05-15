@@ -234,10 +234,10 @@ fn resolve_lsp_scope(
         if let Some(sym) = find_symbol_at_position_by_kind(&symbols, line, col, target_kinds) {
             return Ok(symbol_to_range(&sym.range));
         }
-        if matches!(query.scope, Scope::Variable) {
-            if let Some(sym) = find_symbol_on_line_by_kind(&symbols, line, target_kinds) {
-                return Ok(symbol_to_range(&sym.range));
-            }
+        if matches!(query.scope, Scope::Variable)
+            && let Some(sym) = find_symbol_on_line_by_kind(&symbols, line, target_kinds)
+        {
+            return Ok(symbol_to_range(&sym.range));
         }
         return Err(ChordError::resolve(
             buffer_name,
@@ -381,12 +381,11 @@ fn resolve_variable_scope(
             .or_else(|| find_symbol_on_line_by_kind(&symbols, line, target_kinds))
             .map(|sym| (sym.range.start_line, sym.range.start_col));
 
-        if let Some((var_line, var_col)) = var_pos {
-            if let Ok(sel) = lsp.selection_range(path, var_line, var_col) {
-                if let Some(range) = find_enclosing_declaration(&sel) {
-                    return Ok(range);
-                }
-            }
+        if let Some((var_line, var_col)) = var_pos
+            && let Ok(sel) = lsp.selection_range(path, var_line, var_col)
+            && let Some(range) = find_enclosing_declaration(&sel)
+        {
+            return Ok(range);
         }
     }
 
@@ -545,22 +544,22 @@ fn resolve_name_component(
 
     if let Some((line, col)) = query.args.cursor_pos {
         let target_kinds = scope_to_symbol_kinds(query.scope);
-        if !target_kinds.is_empty() {
-            if let Some(sym) = find_symbol_in_range(&symbols, scope_range, &target_kinds) {
-                return Ok(symbol_name_range(sym));
-            }
+        if !target_kinds.is_empty()
+            && let Some(sym) = find_symbol_in_range(&symbols, scope_range, &target_kinds)
+        {
+            return Ok(symbol_name_range(sym));
         }
 
-        if let Some(sym) = find_innermost_symbol(&symbols, line, col) {
-            if target_kinds.is_empty() || matches_kind(&sym.kind, &target_kinds) {
-                return Ok(symbol_name_range(sym));
-            }
+        if let Some(sym) = find_innermost_symbol(&symbols, line, col)
+            && (target_kinds.is_empty() || matches_kind(&sym.kind, &target_kinds))
+        {
+            return Ok(symbol_name_range(sym));
         }
 
-        if query.scope == Scope::Variable {
-            if let Some(range) = extract_variable_name_from_text(buffer, scope_range) {
-                return Ok(range);
-            }
+        if query.scope == Scope::Variable
+            && let Some(range) = extract_variable_name_from_text(buffer, scope_range)
+        {
+            return Ok(range);
         }
 
         return Err(ChordError::resolve(
@@ -1261,15 +1260,15 @@ fn scan_balanced(
                 depth += 1;
             } else if ch == close {
                 depth -= 1;
-                if depth == 0 {
-                    if let Some((sl, sc)) = start {
-                        return Some(TextRange {
-                            start_line: sl,
-                            start_col: sc,
-                            end_line: line_idx,
-                            end_col: col + 1,
-                        });
-                    }
+                if depth == 0
+                    && let Some((sl, sc)) = start
+                {
+                    return Some(TextRange {
+                        start_line: sl,
+                        start_col: sc,
+                        end_line: line_idx,
+                        end_col: col + 1,
+                    });
                 }
             }
         }
@@ -1615,7 +1614,7 @@ fn find_self_paired_delimiter(
         }
     }
 
-    if count % 2 == 0 {
+    if count.is_multiple_of(2) {
         return None;
     }
 
