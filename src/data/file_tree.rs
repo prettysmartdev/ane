@@ -27,10 +27,7 @@ impl FileTree {
         let root = root.canonicalize()?;
         let mut entries = Vec::new();
 
-        for entry in WalkDir::new(&root)
-            .sort_by_file_name()
-            .min_depth(1)
-        {
+        for entry in WalkDir::new(&root).sort_by_file_name().min_depth(1) {
             let entry = entry?;
             let depth = entry.depth() - 1;
             entries.push(FileEntry {
