@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use ane::commands::chord_engine::types::{ChordAction, DiffLine};
 use ane::commands::chord_engine::ChordEngine;
+use ane::commands::chord_engine::types::{ChordAction, DiffLine};
 use ane::commands::lsp_engine::{LspEngine, LspEngineConfig};
 use ane::data::buffer::Buffer;
 use ane::data::lsp::types::{DocumentSymbol, SymbolKind, SymbolRange};

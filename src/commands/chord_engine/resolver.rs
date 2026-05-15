@@ -1550,7 +1550,7 @@ fn find_paired_delimiter(
                                 end_line: line_idx,
                                 end_col: col + 1,
                             };
-                            if best.as_ref().map_or(true, |b| {
+                            if best.as_ref().is_none_or(|b| {
                                 delimiter_span_size(&range) < delimiter_span_size(b)
                             }) {
                                 best = Some(range);

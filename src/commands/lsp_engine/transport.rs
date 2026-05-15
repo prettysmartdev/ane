@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{ChildStdin, ChildStdout};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 

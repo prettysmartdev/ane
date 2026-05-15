@@ -54,7 +54,7 @@ impl ChordEngine {
         if input.len() != 4 {
             return None;
         }
-        if input.chars().next().map_or(true, |c| c.is_uppercase()) {
+        if input.chars().next().is_none_or(|c| c.is_uppercase()) {
             return None;
         }
         let mut query = match Self::parse(input) {

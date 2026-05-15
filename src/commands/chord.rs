@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::io::{IsTerminal, Read};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::data::buffer::Buffer;
 use crate::data::lsp::registry;
 use crate::data::lsp::types::ServerState;
 
-use super::chord_engine::types::{ChordArgs, ChordQuery};
 use super::chord_engine::ChordEngine;
+use super::chord_engine::types::{ChordArgs, ChordQuery};
 use super::lsp_engine::LspEngine;
 
 pub trait FrontendCapabilities {
@@ -280,7 +280,7 @@ mod tests {
         f_rs.flush().unwrap();
 
         let chord = parse_chord("cifc").unwrap(); // ChangeInsideFunctionContents, requires_lsp=true
-                                                  // No target_name or cursor_pos set → error before LSP starts
+        // No target_name or cursor_pos set → error before LSP starts
         let result = execute_chord(&HeadlessContext, f_rs.path(), &chord, &mut default_engine());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

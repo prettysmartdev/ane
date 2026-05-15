@@ -6,17 +6,17 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
+    event::{self, Event, KeyCode, KeyModifiers},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     layout::{Constraint, Direction, Layout, Rect},
     prelude::CrosstermBackend,
-    Terminal,
 };
 
-use crate::commands::chord_engine::{parens_balanced, ChordEngine};
+use crate::commands::chord_engine::{ChordEngine, parens_balanced};
 use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
 use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
@@ -99,9 +99,7 @@ fn move_cursor_right(state: &mut EditorState) {
         let at_end = state
             .current_buffer()
             .and_then(|b| b.lines.get(state.cursor_line))
-            .map_or(true, |line| {
-                snap_to_char_boundary(line, state.cursor_col) >= line.len()
-            });
+            .is_none_or(|line| snap_to_char_boundary(line, state.cursor_col) >= line.len());
         let count = state.current_buffer().map_or(0, |b| b.line_count());
         (at_end, count)
     };
@@ -1208,9 +1206,11 @@ mod tests {
         assert_eq!(got_b.len(), 1);
         assert_eq!(got_b[0].token_type, "string");
         // cross-check isolation
-        assert!(receiver
-            .tokens_for(std::path::Path::new("/tmp/c.go"))
-            .is_empty());
+        assert!(
+            receiver
+                .tokens_for(std::path::Path::new("/tmp/c.go"))
+                .is_empty()
+        );
     }
 
     #[test]

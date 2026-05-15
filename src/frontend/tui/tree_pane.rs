@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
-    Frame,
 };
 
 use crate::data::file_tree::FileEntry;
@@ -77,11 +77,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
                     .get(i + 1)
                     .map(|next| next.depth > entry.depth)
                     .unwrap_or(false);
-                if is_expanded {
-                    "▾"
-                } else {
-                    "▸"
-                }
+                if is_expanded { "▾" } else { "▸" }
             } else {
                 " "
             };

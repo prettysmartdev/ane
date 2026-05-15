@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Position, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
-    Frame,
 };
 
 use crate::data::state::EditorState;

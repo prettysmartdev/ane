@@ -6,8 +6,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, bail};
+use serde_json::{Value, json};
 
 use crate::data::lsp::registry;
 use crate::data::lsp::types::{
@@ -1334,10 +1334,12 @@ mod tests {
         let mut engine = LspEngine::new(LspEngineConfig::default());
         let result = engine.install_server(Language::Rust);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("no server registered"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no server registered")
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::data::chord_types::{
-    is_valid_combination, is_valid_jump_combination, Action, Component, Positional, Scope,
+    Action, Component, Positional, Scope, is_valid_combination, is_valid_jump_combination,
 };
 
 use super::errors::ChordError;
@@ -405,7 +405,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::parse;
     use crate::data::chord_types::{
-        is_valid_combination, is_valid_jump_combination, Action, Component, Positional, Scope,
+        Action, Component, Positional, Scope, is_valid_combination, is_valid_jump_combination,
     };
 
     const ALL_ACTIONS: &[Action] = &[

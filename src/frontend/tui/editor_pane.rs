@@ -1,9 +1,9 @@
 use ratatui::{
+    Frame,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
-    Frame,
 };
 
 use crate::data::lsp::types::SemanticToken;

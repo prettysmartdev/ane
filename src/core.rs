@@ -1,9 +1,9 @@
-pub use crate::commands::chord::{execute_chord, parse_chord, ChordResult, FrontendCapabilities};
+pub use crate::commands::chord::{ChordResult, FrontendCapabilities, execute_chord, parse_chord};
+pub use crate::commands::chord_engine::ChordEngine;
 pub use crate::commands::chord_engine::errors::ChordError;
 pub use crate::commands::chord_engine::types::{
     ChordAction, ChordArgs, ChordQuery, ResolvedChord, TextRange,
 };
-pub use crate::commands::chord_engine::ChordEngine;
 pub use crate::commands::diff::unified_diff;
 pub use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
 pub use crate::data::buffer::Buffer;
