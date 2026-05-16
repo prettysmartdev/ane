@@ -72,6 +72,11 @@ pub enum Language {
     TypeScript,
     Python,
     Markdown,
+    Json,
+    Yaml,
+    Toml,
+    Dockerfile,
+    Xml,
 }
 
 pub struct LanguageCapabilities {
@@ -102,6 +107,26 @@ impl Language {
                 has_tree_sitter: true,
                 has_lsp: false,
             },
+            Language::Json => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
+            Language::Yaml => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
+            Language::Toml => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
+            Language::Dockerfile => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
+            Language::Xml => LanguageCapabilities {
+                has_tree_sitter: true,
+                has_lsp: false,
+            },
         }
     }
 
@@ -112,14 +137,32 @@ impl Language {
             "ts" | "tsx" | "js" | "jsx" => Some(Self::TypeScript),
             "py" => Some(Self::Python),
             "md" | "markdown" => Some(Self::Markdown),
+            "json" | "jsonc" => Some(Self::Json),
+            "yaml" | "yml" => Some(Self::Yaml),
+            "toml" => Some(Self::Toml),
+            "dockerfile" => Some(Self::Dockerfile),
+            "xml" | "xsd" | "xsl" | "xslt" | "svg" | "rss" => Some(Self::Xml),
             _ => None,
         }
     }
 
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(Self::from_extension)
+        if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && let Some(lang) = Self::from_extension(ext)
+        {
+            return Some(lang);
+        }
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let lower = file_name.to_ascii_lowercase();
+        if lower == "docker-compose.yml" || lower == "docker-compose.yaml" {
+            return Some(Self::Yaml);
+        }
+        // Match `Dockerfile`, `dockerfile`, and any `Dockerfile{suffix}` variant
+        // (e.g. `Dockerfile.dev`, `Dockerfile-prod`) case-insensitively.
+        if lower.starts_with("dockerfile") {
+            return Some(Self::Dockerfile);
+        }
+        None
     }
 
     pub fn language_id_for_path(path: &std::path::Path) -> Option<&'static str> {
@@ -144,6 +187,11 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::Python => "python",
             Self::Markdown => "markdown",
+            Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+            Self::Dockerfile => "dockerfile",
+            Self::Xml => "xml",
         }
     }
 
@@ -154,6 +202,11 @@ impl Language {
             Self::TypeScript => "ts",
             Self::Python => "py",
             Self::Markdown => "md",
+            Self::Json => "json",
+            Self::Yaml => "yaml",
+            Self::Toml => "toml",
+            Self::Dockerfile => "docker",
+            Self::Xml => "xml",
         }
     }
 }
@@ -565,6 +618,107 @@ mod tests {
                 assert_eq!(new, ServerState::Running);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn from_path_extension_detection_0009() {
+        use std::path::Path;
+        assert_eq!(
+            Language::from_path(Path::new("config.json")),
+            Some(Language::Json)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("data.yaml")),
+            Some(Language::Yaml)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("data.yml")),
+            Some(Language::Yaml)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("config.toml")),
+            Some(Language::Toml)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("schema.xml")),
+            Some(Language::Xml)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("image.svg")),
+            Some(Language::Xml)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("schema.xsd")),
+            Some(Language::Xml)
+        );
+        assert_eq!(Language::from_path(Path::new("unknown.foo")), None);
+    }
+
+    #[test]
+    fn from_path_dockerfile_stem_detection() {
+        use std::path::Path;
+        assert_eq!(
+            Language::from_path(Path::new("/project/Dockerfile")),
+            Some(Language::Dockerfile)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("/project/dockerfile")),
+            Some(Language::Dockerfile)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("/project/app.dockerfile")),
+            Some(Language::Dockerfile)
+        );
+        assert_eq!(
+            Language::from_path(Path::new("/project/main.go")),
+            Some(Language::Go)
+        );
+    }
+
+    #[test]
+    fn from_path_dockerfile_prefix_variants() {
+        use std::path::Path;
+        // Any filename starting with "Dockerfile" (case-insensitive) is Dockerfile.
+        for name in [
+            "Dockerfile.dev",
+            "Dockerfile.prod",
+            "Dockerfile-test",
+            "Dockerfile_ci",
+            "DOCKERFILE",
+            "dockerfile-utils",
+        ] {
+            assert_eq!(
+                Language::from_path(Path::new(name)),
+                Some(Language::Dockerfile),
+                "{name} should resolve to Dockerfile"
+            );
+        }
+        // Compose files keep their YAML mapping.
+        assert_eq!(
+            Language::from_path(Path::new("docker-compose.yml")),
+            Some(Language::Yaml)
+        );
+        // Names that don't start with "dockerfile" still fall through.
+        assert_eq!(Language::from_path(Path::new("README")), None);
+    }
+
+    #[test]
+    fn capabilities_new_variants_0009() {
+        for lang in [
+            Language::Json,
+            Language::Yaml,
+            Language::Toml,
+            Language::Dockerfile,
+            Language::Xml,
+        ] {
+            let caps = lang.capabilities();
+            assert!(
+                caps.has_tree_sitter,
+                "{} should have has_tree_sitter: true",
+                lang.name()
+            );
+            assert!(!caps.has_lsp, "{} should have has_lsp: false", lang.name());
         }
     }
 }

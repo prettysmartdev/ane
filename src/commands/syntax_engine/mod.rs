@@ -566,4 +566,45 @@ mod tests {
             "exactly one worker delivery (for C); B was overwritten before worker took it"
         );
     }
+
+    #[test]
+    fn compute_no_lsp_for_config_languages() {
+        let (mut engine, calls) = make_engine();
+
+        let cases: &[(&str, &str)] = &[
+            ("config.json", r#"{"x": 1}"#),
+            ("config.yaml", "x: 1\n"),
+            ("config.toml", "x = 1\n"),
+            ("Dockerfile", "FROM ubuntu:22.04\n"),
+            ("schema.xml", "<r/>"),
+        ];
+
+        for (filename, content) in cases {
+            engine.compute(Path::new(filename), content);
+        }
+
+        assert_eq!(
+            call_count(&calls),
+            5,
+            "one synchronous delivery per config file"
+        );
+
+        {
+            let guard = calls.lock().unwrap();
+            for (i, (_path, tokens)) in guard.iter().enumerate() {
+                assert!(
+                    !tokens.is_empty(),
+                    "case {i}: expected non-empty tree-sitter tokens"
+                );
+            }
+        }
+
+        // Wait past the debounce window — no LSP worker delivery for has_lsp: false languages
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(
+            call_count(&calls),
+            5,
+            "no additional worker delivery for config languages (has_lsp: false)"
+        );
+    }
 }

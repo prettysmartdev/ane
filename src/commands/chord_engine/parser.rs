@@ -1145,7 +1145,10 @@ mod tests {
     #[test]
     fn parse_celd_invalid_line_definition_combo() {
         let result = parse("celd");
-        assert!(result.is_err(), "celd should fail: Line+Definition is invalid");
+        assert!(
+            result.is_err(),
+            "celd should fail: Line+Definition is invalid"
+        );
     }
 
     #[test]

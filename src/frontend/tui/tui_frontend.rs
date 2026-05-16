@@ -147,12 +147,23 @@ mod tests {
         use crate::commands::chord_engine::types::ListItem;
         let (_f, mut state) = make_state("hello\nworld");
         let items = vec![
-            ListItem { val: "foo".to_string(), line: 2, col: 5 },
-            ListItem { val: "bar".to_string(), line: 7, col: 0 },
+            ListItem {
+                val: "foo".to_string(),
+                line: 2,
+                col: 5,
+            },
+            ListItem {
+                val: "bar".to_string(),
+                line: 7,
+                col: 0,
+            },
         ];
         let mut frontend = TuiFrontend::new();
         frontend.show_list(&mut state, &items).unwrap();
-        let dialog = state.list_dialog.as_ref().expect("list_dialog should be set");
+        let dialog = state
+            .list_dialog
+            .as_ref()
+            .expect("list_dialog should be set");
         assert_eq!(dialog.items.len(), 2);
         assert_eq!(dialog.items[0], ("foo".to_string(), 2, 5));
         assert_eq!(dialog.items[1], ("bar".to_string(), 7, 0));

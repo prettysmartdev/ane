@@ -1846,10 +1846,7 @@ mod tests {
     fn handle_list_dialog_enter_navigates_to_selected_item() {
         let (_f, mut state) = make_state_with_lines(&["aaa", "bbb", "ccc"]);
         state.list_dialog = Some(crate::data::state::ListDialogState {
-            items: vec![
-                ("foo".to_string(), 0, 3),
-                ("bar".to_string(), 2, 1),
-            ],
+            items: vec![("foo".to_string(), 0, 3), ("bar".to_string(), 2, 1)],
             selected: 1,
         });
         state.cursor_line = 0;

@@ -616,7 +616,10 @@ mod tests {
     fn definition_component_invalid_combinations() {
         assert!(!is_valid_combination(Scope::Line, Component::Definition));
         assert!(!is_valid_combination(Scope::Buffer, Component::Definition));
-        assert!(!is_valid_combination(Scope::Delimiter, Component::Definition));
+        assert!(!is_valid_combination(
+            Scope::Delimiter,
+            Component::Definition
+        ));
         assert!(!is_valid_combination(Scope::Member, Component::Definition));
     }
 

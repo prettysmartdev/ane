@@ -5326,10 +5326,7 @@ mod tests {
     #[test]
     fn resolve_list_entire_returns_all_functions_in_source_order() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
-        );
+        let buffer = named_buf(path, &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = mock_lsp(
@@ -5450,10 +5447,7 @@ mod tests {
     #[test]
     fn resolve_list_last_filter_returns_only_last_item() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
-        );
+        let buffer = named_buf(path, &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = mock_lsp(
@@ -5483,10 +5477,7 @@ mod tests {
     #[test]
     fn resolve_list_first_filter_returns_only_first_item() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
-        );
+        let buffer = named_buf(path, &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = mock_lsp(

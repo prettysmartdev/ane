@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn unknown_extensions_produce_no_languages() {
-        let files = [Path::new("config.json"), Path::new("data.csv")];
+        let files = [Path::new("data.csv"), Path::new("readme.txt")];
         let langs = detect_languages(Path::new("/tmp"), &files);
         assert!(langs.is_empty());
     }

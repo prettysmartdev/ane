@@ -173,11 +173,19 @@ mod tests {
     fn show_list_format_is_one_indexed_line_and_col() {
         // The format string used by show_list: "{}:{}  {}", line+1, col+1, val
         use crate::commands::chord_engine::types::ListItem;
-        let item = ListItem { val: "foo".to_string(), line: 0, col: 0 };
+        let item = ListItem {
+            val: "foo".to_string(),
+            line: 0,
+            col: 0,
+        };
         let formatted = format!("{}:{}  {}", item.line + 1, item.col + 1, item.val);
         assert_eq!(formatted, "1:1  foo");
 
-        let item2 = ListItem { val: "bar".to_string(), line: 4, col: 0 };
+        let item2 = ListItem {
+            val: "bar".to_string(),
+            line: 4,
+            col: 0,
+        };
         let formatted2 = format!("{}:{}  {}", item2.line + 1, item2.col + 1, item2.val);
         assert_eq!(formatted2, "5:1  bar");
     }
@@ -195,8 +203,16 @@ mod tests {
             highlight_ranges: vec![],
             warnings: vec![],
             listed_items: vec![
-                ListItem { val: "foo".to_string(), line: 0, col: 0 },
-                ListItem { val: "bar".to_string(), line: 4, col: 0 },
+                ListItem {
+                    val: "foo".to_string(),
+                    line: 0,
+                    col: 0,
+                },
+                ListItem {
+                    val: "bar".to_string(),
+                    line: 4,
+                    col: 0,
+                },
             ],
         };
         let mut frontend = CliFrontend::new();

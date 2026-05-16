@@ -103,7 +103,12 @@ pub fn workspace_root_for_language(path: &Path, lang: Language) -> Option<PathBu
             .or_else(|| nearest_ancestor_with(path, "package.json")),
         Language::Python => nearest_ancestor_with(path, "pyrightconfig.json")
             .or_else(|| nearest_ancestor_with(path, "pyproject.toml")),
-        Language::Markdown => None,
+        Language::Markdown
+        | Language::Json
+        | Language::Yaml
+        | Language::Toml
+        | Language::Dockerfile
+        | Language::Xml => None,
     }
 }
 
@@ -194,6 +199,10 @@ mod tests {
         );
         assert_eq!(
             detect_language_from_path(std::path::Path::new("config.json")),
+            Some(Language::Json)
+        );
+        assert_eq!(
+            detect_language_from_path(std::path::Path::new("unknown.zzz")),
             None
         );
     }

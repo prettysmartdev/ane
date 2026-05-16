@@ -743,8 +743,16 @@ mod tests {
             cursor_destination: None,
             mode_after: None,
             listed_items: vec![
-                ListItem { val: "foo".to_string(), line: 0, col: 3 },
-                ListItem { val: "bar".to_string(), line: 1, col: 3 },
+                ListItem {
+                    val: "foo".to_string(),
+                    line: 0,
+                    col: 3,
+                },
+                ListItem {
+                    val: "bar".to_string(),
+                    line: 1,
+                    col: 3,
+                },
             ],
         };
         let mut resolutions = HashMap::new();

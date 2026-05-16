@@ -20,6 +20,7 @@ fn token_style(token_type: &str) -> Style {
         "string" => Style::default().fg(Color::Green),
         "number" => Style::default().fg(Color::Magenta),
         "comment" => Style::default().fg(Color::DarkGray),
+        "key" => Style::default().fg(Color::Cyan),
         "variable" | "parameter" | "property" => Style::default().fg(Color::White),
         "macro" => Style::default().fg(Color::LightMagenta),
         "operator" => Style::default().fg(Color::LightRed),
@@ -714,5 +715,15 @@ mod tests {
         let (_f, state) = make_state_with_lines(&["\thello"]);
         let area = Rect::new(0, 0, 30, 10);
         assert_eq!(screen_to_buffer(10, 0, area, &state), Some((0, 5)));
+    }
+
+    #[test]
+    fn token_style_key_is_cyan() {
+        assert_eq!(token_style("key"), Style::default().fg(Color::Cyan));
+    }
+
+    #[test]
+    fn token_style_key_differs_from_string() {
+        assert_ne!(token_style("key"), token_style("string"));
     }
 }
