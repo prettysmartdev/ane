@@ -5,11 +5,13 @@ Issue: issuelink
 
 ## Summary
 
-Add four new chord grammar elements: `l/List` action, `w/Word` component, `l/Last` positional, and `f/First` positional.
+Add five new chord grammar elements: `l/List` action, `w/Word` component, `d/Definition` component, `l/Last` positional, and `f/First` positional.
 
 **`l/List` action** generates a list of matching items rather than modifying the buffer. In CLI, each item and its line number is printed to stdout. In TUI, a scrollable dialog appears; the user navigates with arrow keys and presses Enter to jump the cursor to the selected item. List is an exploratory action for discovering what exists in a file. When action is List, the positional changes meaning: instead of narrowing a range, it acts as a positional **filter** on the collected items — e.g. `lafn` lists only function names that appear *after* the cursor, and `lefn` lists all of them.
 
 **`w/Word` component** targets a whitespace-delimited word in a line or buffer, analogous to vim's `w` target. It is text-based with no LSP requirement.
+
+**`d/Definition` component** selects the entire definition signature of a scope, excluding its body. A definition is everything that declares the item's identity and type contract: for a variable, the keyword + name + type annotation (`let somename: int64`); for a function, the visibility + keyword + name + parameters + return type (`pub fn some_func(some_param: int) -> returnval`); for a struct/enum, the visibility + keyword + name + generic parameters (`pub struct Foo<T>`). The body (brace-delimited contents) is never included. Useful with `l/List` — e.g. `lefd` lists all function definitions in the buffer — giving a quick structural overview without reading implementation details.
 
 **`l/Last` positional** selects the last occurrence of the component within the scope — e.g. `jllw` jumps to the last word in the current line, `jlfn` jumps to the last function's name in the buffer.
 
@@ -20,6 +22,10 @@ Example chords:
 - `lisn` / `ListInsideStructName` — list struct names within the scope at cursor
 - `lemn` / `ListEntireMemberName` — list all member names of the enclosing struct or enum
 - `lafn` / `ListAfterFunctionName` — list function names that appear after the cursor
+- `lefd` / `ListEntireFunctionDefinition` — list all function definitions (signatures) in the buffer
+- `cefd` / `ChangeEntireFunctionDefinition` — change a function's entire signature
+- `yevd` / `YankEntireVariableDefinition` — yank a variable's declaration (keyword + name + type)
+- `desd` / `DeleteEntireStructDefinition` — delete a struct's declaration line without its body
 - `celw` / `ChangeEntireLineWord` — change the word the cursor is on
 - `jnlw` / `JumpNextLineWord` — jump to the next word in the current line
 - `jllw` / `JumpLastLineWord` — jump to the last word in the line
@@ -40,11 +46,18 @@ So I can: explore the structure of an unfamiliar file and navigate to any functi
 ### User Story 2
 As a: developer
 
+I want to: type `lefd` in chord mode and see a scrollable overlay showing the full signature of every function in the file — e.g. `pub fn process(input: &str) -> Result<Output>` — without their bodies
+
+So I can: quickly scan a file's API surface and understand the type contracts at a glance, which is faster than scrolling through implementations
+
+### User Story 3
+As a: developer
+
 I want to: use the `w/Word` component with Jump and Change actions — e.g. `jnlw` to jump to the next word, `celw` to change the word under the cursor — and use the `f/First` and `l/Last` positionals to reach the first or last word in the line instantly
 
 So I can: perform word-level navigation and editing in the TUI without lifting my hands from the keyboard or pressing arrow keys repeatedly
 
-### User Story 3
+### User Story 4
 As a: code agent
 
 I want to: run `ane exec file.rs lefn` and receive a line-separated list of function names with their line numbers on stdout
@@ -78,6 +91,26 @@ pub enum Component {
 ```
 
 `"w"` is unused in the current component set (`b c e v p a n s`). Update `short()`, `from_short()`, and `Display`. Update `each_position_has_unique_short_letters` to include `"w"` in the components array.
+
+**New `Component::Definition`** — short `"d"`, long `"Definition"`:
+
+```rust
+pub enum Component {
+    // existing...
+    Definition,
+}
+```
+
+`"d"` is unused in the current component set (`b c e v p a n s w`). Update `short()`, `from_short()`, and `Display`. Update `each_position_has_unique_short_letters` to include `"d"` in the components array.
+
+Update `is_valid_combination` to include Definition rules. Definition requires LSP and is meaningful for scopes that have declarations:
+
+```rust
+(Scope::Function | Scope::Variable | Scope::Struct, Component::Definition) => true,
+(_, Component::Definition) => false,
+```
+
+Definition is not meaningful for Line, Buffer, Delimiter, or Member scopes. A function's definition is its signature; a variable's definition is its declaration; a struct's definition is its head line (the Struct scope covers both structs and enums).
 
 Update `is_valid_combination` to include Word rules. Word is text-based and only meaningful for Line and Buffer scopes:
 
@@ -127,7 +160,7 @@ Add:
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListItem {
-    pub name: String,
+    pub val: String, // the full value that was selected (function/var name, full definition, etc.)
     pub line: usize,
     pub col: usize,
 }
@@ -145,6 +178,7 @@ For non-List actions, `listed_items` is always empty. For `Action::List`, `diff`
 
 - Map `"l"` / `"List"` → `Action::List` in short- and long-form parsers.
 - Map `"w"` / `"Word"` → `Component::Word`.
+- Map `"d"` / `"Definition"` → `Component::Definition`.
 - Map `"l"` / `"Last"` → `Positional::Last`.
 - Map `"f"` / `"First"` → `Positional::First`.
 
@@ -176,8 +210,9 @@ Resolution steps:
 
 1. **Collect candidates**: gather all LSP symbols matching the scope kind (for LSP scopes), or all words in the buffer (for Buffer scope + Word component), or all words in the target line (for Line scope + Word component). For LSP scopes the full symbol tree is requested via `document_symbols()`. Filter by component to determine what property to surface:
    - `Name`: use each symbol's `selectionRange` start position and name string.
+   - `Definition`: use each symbol's range start position and the full definition text (from scope start to body opener, as resolved by `resolve_definition_component`).
    - `End`: use each symbol's range end position and name string.
-   - Other components with LSP scopes: unsupported for List — emit a parse error during parsing if component is not Name, End, or Self_ when action is List with an LSP scope.
+   - Other components with LSP scopes: unsupported for List — emit a parse error during parsing if component is not Name, Definition, End, or Self_ when action is List with an LSP scope.
 
 2. **Apply positional as filter**: given the collected `Vec<ListItem>` and the cursor position (from `args.cursor_pos` when required):
    - `Entire` → return all items (no filtering)
@@ -215,6 +250,61 @@ A word is a maximal run of non-whitespace characters (`!char.is_ascii_whitespace
 6. For `Positional::Inside` / `Positional::Entire`: equivalent for Word (a word has no inner delimiters).
 
 If the cursor is on whitespace and no word is adjacent in the requested direction, return an error: `"no word found at cursor position"`.
+
+#### `Component::Definition` resolution
+
+Add a new `resolve_definition_component` function:
+
+```rust
+fn resolve_definition_component(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    scope_range: &TextRange,
+    lsp: &mut LspEngine,
+    buffer_name: &str,
+) -> Result<TextRange>
+```
+
+The Definition component returns the range from the start of the scope to the start of the body (exclusive), trimming trailing whitespace. The algorithm:
+
+1. **Find the scope start**: use `scope_range.start` — this is the beginning of the full declaration (includes visibility modifiers, keywords, etc.).
+
+2. **Find the body start**: locate the opening brace `{` of the scope's body using `find_brace_range()`. The definition ends immediately before the opening brace (after trimming trailing whitespace before the brace).
+
+3. **Handle scopes without brace bodies**:
+   - **Variable**: the definition is from scope start up to (but not including) the `=` sign. For variables without assignment (e.g. `let x: i32;`), the definition is the entire scope.
+   - **Function**: from scope start to the opening `{` of the function body. For function declarations without bodies (trait methods, extern fns), the definition is the entire scope up to the `;`.
+   - **Struct** (covers both structs and enums): from scope start to the opening `{`. For unit structs (`struct Foo;`), the definition is the entire scope.
+
+4. **Trim trailing whitespace**: the returned range should not include trailing whitespace or newlines between the last meaningful token and the body opener.
+
+Examples of what Definition selects:
+
+```rust
+// Variable: "let count: i32" (excludes "= 0;")
+let count: i32 = 0;
+
+// Variable without assignment: "let count: i32" (entire declaration minus semicolon)
+let count: i32;
+
+// Function: "pub fn process(input: &str) -> Result<Output>" (excludes "{ ... }")
+pub fn process(input: &str) -> Result<Output> {
+    // body
+}
+
+// Struct: "pub struct Config<T>" (excludes "{ ... }")
+pub struct Config<T> {
+    field: T,
+}
+
+// Enum (via Struct scope): "pub enum Status" (excludes "{ ... }")
+pub enum Status {
+    Active,
+    Inactive,
+}
+```
+
+For `Action::List` with `Component::Definition`, each `ListItem.val` contains the full definition text (trimmed). This enables `lefd` to show all function signatures in the buffer as a readable summary.
 
 #### `Positional::Last` and `Positional::First` in standard resolution
 
@@ -299,11 +389,11 @@ pub struct ListDialog {
 }
 ```
 
-Rendering: centered overlay with a title bar ("List Results"), a scrollable list of entries formatted as `{name}  (line {line+1})`, and a highlight on the selected row. The visible window adjusts `scroll_offset` to keep `selected` in view.
+Rendering: centered overlay with a title bar ("List Results"), a scrollable list of entries formatted as `{val}  (line {line+1})`, and a highlight on the selected row. The visible window adjusts `scroll_offset` to keep `selected` in view.
 
 Key handling (in `EditorMode::ListDialog` or similar new mode):
 - `Up` / `Down` arrows: move `selected`, adjust `scroll_offset` if needed
-- `Enter`: set `state.cursor_line` and `state.cursor_col` from the selected item, close dialog, return to Edit mode
+- `Enter`: jump the viewable buffer area if needed, set `state.cursor_line` and `state.cursor_col` from the selected item, close dialog, return to Edit mode
 - `Escape`: close dialog without navigating, return to previous mode
 
 Implement `ListFrontend` for `TuiFrontend`:
@@ -330,7 +420,7 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 - **List with LSP not ready**: for LSP-scoped chords, the resolver returns a `ChordError::resolve` describing the LSP-unavailable state, same as existing behavior for other LSP chords.
 - **List + Inside positional with no cursor**: emit `"Inside positional requires a cursor position (cursor arg)"` before any LSP calls.
 - **List + After/Before/Next/Previous with no cursor**: same error pattern as the existing `Until` and `Next` positionals.
-- **List + non-Name component on LSP scope**: restrict to Name, End, and Self_ for the initial implementation. Reject at parse time with `"List action only supports Name, End, and Self components for LSP scopes"`. This avoids the complexity of rendering parameter lists or values as list items.
+- **List + non-Name component on LSP scope**: restrict to Name, Definition, End, and Self_ for the initial implementation. Reject at parse time with `"List action only supports Name, Definition, End, and Self components for LSP scopes"`. This avoids the complexity of rendering parameter lists or values as list items.
 - **List on CLI is not interactive but is valid**: unlike Jump, List does not require an interactive frontend. `requires_interactive` remains `false` for `Action::List`.
 
 ### Word component
@@ -342,6 +432,18 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 - **Tab characters**: treat as whitespace (word boundary). The col offset must account for tab width in terms of buffer column, not visual column.
 - **Unicode**: word boundary detection uses `char::is_whitespace()` (not ASCII-only) to correctly handle Unicode whitespace. Positions are tracked as character offsets, matching LSP convention.
 - **Word spanning a component boundary**: if the cursor is on a word that extends beyond the resolved scope, clip to the scope boundary.
+
+### Definition component
+
+- **No body (trait method, extern fn)**: if the function has no brace body (ends with `;`), the definition is the entire scope excluding the trailing semicolon.
+- **Variable without assignment**: for `let x: i32;`, the definition is `let x: i32` (excludes the semicolon). For `let x = 5;`, the definition is `let x` (up to but not including the `=`). For `let x: i32 = 5;`, the definition is `let x: i32`.
+- **Unit struct**: `struct Foo;` — the definition is `struct Foo` (excludes semicolon).
+- **Tuple struct**: `struct Foo(i32, i32);` — the definition is `struct Foo` (excludes the parenthesized fields, which are its "body").
+- **Multi-line signatures**: for functions with parameters spanning multiple lines, the definition includes all lines from the start through the return type, stopping before the `{`. The range is contiguous.
+- **Attributes and doc comments**: attributes (`#[...]`) and doc comments (`///`) that precede the definition are NOT included. The definition starts at the first keyword token (visibility modifier or item keyword). This matches LSP symbol range start behavior.
+- **Generic where clauses**: included in the definition. E.g. `fn foo<T>(x: T) -> T where T: Clone` is the full definition for a function whose body follows.
+- **Definition with List action**: when used with `lefd`, each list item's `name` field contains the full definition text. Long signatures may be truncated in the TUI dialog display (with `...`) but the full text is available for cursor navigation.
+- **Definition on invalid scopes**: `(Line, Definition)`, `(Buffer, Definition)`, `(Delimiter, Definition)`, `(Member, Definition)` are all invalid combinations, rejected at parse time via `is_valid_combination`.
 
 ### Last and First positionals
 
@@ -355,7 +457,7 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 
 - The short letter `l` now means List (action), Last (positional), and Line (scope). Position in the chord is unambiguous, but the parser must map `l` in position 1 to List, `l` in position 2 to Last, and `l` in position 3 to Line. The existing position-indexed parsing already handles this correctly.
 - Similarly, `f` means First (positional) and Function (scope). No structural change required.
-- `w` is new to the component set and has no conflicts.
+- `w` and `d` are new to the component set and have no conflicts.
 
 ---
 
@@ -364,8 +466,9 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 ### Grammar unit tests — `src/data/chord_types.rs`
 
 - **Round-trip**: `Action::from_short("l") == Some(Action::List)` and back; `Component::from_short("w") == Some(Component::Word)` and back; `Positional::from_short("l") == Some(Positional::Last)` and back; `Positional::from_short("f") == Some(Positional::First)` and back.
-- **Uniqueness**: update `each_position_has_unique_short_letters` to include `"l"` in actions, `"w"` in components, and `"l"`, `"f"` in positionals.
+- **Uniqueness**: update `each_position_has_unique_short_letters` to include `"l"` in actions, `"w"` and `"d"` in components, and `"l"`, `"f"` in positionals.
 - **`is_valid_combination` with Word**: assert `(Line, Word)` and `(Buffer, Word)` are valid; assert `(Function, Word)`, `(Struct, Word)`, `(Variable, Word)`, `(Member, Word)`, `(Delimiter, Word)` are all invalid.
+- **`is_valid_combination` with Definition**: assert `(Function, Definition)`, `(Variable, Definition)`, `(Struct, Definition)` are valid; assert `(Line, Definition)`, `(Buffer, Definition)`, `(Delimiter, Definition)`, `(Member, Definition)` are all invalid.
 - **`is_valid_list_positional`**: assert Outside returns `false`; assert all other positionals return `true`.
 - **`Action::List.requires_interactive()`**: assert returns `false`.
 
@@ -379,9 +482,14 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 - `parse("jllw")` returns `Ok` with `Action::Jump`, `Positional::Last`, `Scope::Line`, `Component::Word`.
 - `parse("jflw")` returns `Ok` with `Action::Jump`, `Positional::First`, `Scope::Line`, `Component::Word`.
 - `parse("jlfn")` returns `Ok` with `Action::Jump`, `Positional::Last`, `Scope::Function`, `Component::Name`.
+- `parse("lefd")` returns `Ok` with `Action::List`, `Positional::Entire`, `Scope::Function`, `Component::Definition`.
+- `parse("cefd")` returns `Ok` with `Action::Change`, `Positional::Entire`, `Scope::Function`, `Component::Definition`.
+- `parse("yevd")` returns `Ok` with `Action::Yank`, `Positional::Entire`, `Scope::Variable`, `Component::Definition`.
+- `parse("celd")` returns `Err` because `(Line, Definition)` is an invalid combination.
 - `parse("lefn(value:\"x\")")` returns `Err` containing `"List action does not accept a value argument"`.
 - `parse("lofn")` returns `Err` containing `"List action does not support the Outside positional"`.
 - Long form `parse("ListEntireFunctionName")` returns the same result as `parse("lefn")`.
+- Long form `parse("ListEntireFunctionDefinition")` returns the same result as `parse("lefd")`.
 - Long form `parse("JumpLastLineWord")` returns the same result as `parse("jllw")`.
 
 ### Resolver unit tests — `src/commands/chord_engine/resolver.rs`
@@ -393,6 +501,15 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 - **`resolve_word_component` — First**: returns range of first word on line regardless of cursor.
 - **`resolve_word_component` — Last**: returns range of last word on line.
 - **`resolve_word_component` — empty line**: returns error.
+- **`resolve_definition_component` — Function**: buffer `"pub fn foo(x: i32) -> bool {\n    true\n}"` → definition range covers `"pub fn foo(x: i32) -> bool"`.
+- **`resolve_definition_component` — Variable with type and assignment**: buffer `"let count: i32 = 0;"` → definition range covers `"let count: i32"`.
+- **`resolve_definition_component` — Variable without assignment**: buffer `"let count: i32;"` → definition range covers `"let count: i32"`.
+- **`resolve_definition_component` — Variable without type**: buffer `"let count = 0;"` → definition range covers `"let count"`.
+- **`resolve_definition_component` — Struct**: buffer `"pub struct Config<T> {\n    field: T,\n}"` → definition range covers `"pub struct Config<T>"`.
+- **`resolve_definition_component` — Enum (Struct scope)**: buffer `"enum Status {\n    Active,\n}"` → definition range covers `"enum Status"`.
+- **`resolve_definition_component` — Trait method (no body)**: buffer `"fn process(&self) -> Result<()>;"` → definition range covers `"fn process(&self) -> Result<()>"`.
+- **`resolve_definition_component` — Multi-line signature**: buffer with params on multiple lines → definition range spans all lines up to `{`.
+- **`resolve_list` — Definition component**: buffer with two functions; `lefd` returns `ListItem`s whose names are full signatures.
 - **`resolve_list` — Entire with mock LSP**: buffer with three functions; `lefn` returns three `ListItem`s in source order.
 - **`resolve_list` — After filter**: cursor on line 5; functions on lines 2, 5, 8 → After filter returns only the function on line 8.
 - **`resolve_list` — Before filter**: same buffer → Before returns only lines 2 and 5.
@@ -422,6 +539,10 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 - Type `lisn` with cursor inside a struct body — dialog lists only struct names within that scope
 - Type `lafn` — dialog lists only functions after the cursor
 - Type `lofn` — chord box turns red with the Outside error message
+- Type `lefd` — dialog lists full function signatures (e.g. `pub fn process(input: &str) -> Result<Output>`) with line numbers
+- Type `cefd` with cursor inside a function — the entire function signature is selected for editing; body remains intact
+- Type `yevd` with cursor on a variable — yanks the variable declaration (keyword + name + type) without the assignment
+- Run `ane exec file.rs lefd` — stdout shows one definition signature per line with line:col prefix
 - Type `celw` with cursor on a word — word is cleared and Edit mode entered; surrounding words unaffected
 - Type `jnlw` — cursor jumps to the next whitespace-delimited word on the same line
 - Type `jllw` — cursor jumps to the last word on the current line
@@ -434,12 +555,12 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
 
 ## Codebase Integration
 
-- **Layer 0** (`src/data/chord_types.rs`): add `Action::List`, `Component::Word`, `Positional::Last`, `Positional::First`. Update `is_valid_combination` for Word. Add `is_valid_list_positional`. No imports from higher layers.
+- **Layer 0** (`src/data/chord_types.rs`): add `Action::List`, `Component::Word`, `Component::Definition`, `Positional::Last`, `Positional::First`. Update `is_valid_combination` for Word and Definition. Add `is_valid_list_positional`. No imports from higher layers.
 
 - **Layer 1** (`src/commands/chord_engine/`):
   - `types.rs`: add `ListItem` struct; add `listed_items: Vec<ListItem>` field to `ChordAction`; define `ListFrontend` trait here so Layer 2 implements it without Layer 1 importing from Layer 2.
   - `parser.rs`: add parsing for new variants; add List-specific post-parse validation.
-  - `resolver.rs`: add `resolve_list` function for List action dispatch; add `resolve_word_component` for Word component; add Last and First arms in `apply_positional`. Compiler non-exhaustive match errors after adding the new enum variants serve as the integration checklist.
+  - `resolver.rs`: add `resolve_list` function for List action dispatch; add `resolve_word_component` for Word component; add `resolve_definition_component` for Definition component; add Last and First arms in `apply_positional`. Compiler non-exhaustive match errors after adding the new enum variants serve as the integration checklist.
   - `patcher.rs`: add `Action::List` arm emitting no diff and populating `listed_items`.
 
 - **Layer 2** (`src/frontend/`):
@@ -448,8 +569,10 @@ Add `list_dialog: Option<ListDialog>` to `EditorState`. Render the dialog overla
   - `tui/tui_frontend.rs`: implement `ListFrontend`; add `EditorMode::ListDialog` variant; add dialog key handling; render dialog overlay in draw function.
   - `data/state.rs` (Layer 0): add `list_dialog: Option<ListDialog>` to `EditorState`. Since `ListDialog` contains `ListItem` which is defined in `commands`, this creates a Layer 1 → Layer 0 dependency if placed in `EditorState`. Instead, keep `list_dialog` on a TUI-specific state struct in Layer 2, or define a thin `ListDialogState` in Layer 0 that holds only the raw data (`Vec<(String, usize, usize)>`). The latter keeps Layer 0 clean.
 
-- **Compiler-driven integration**: adding `Action::List`, `Component::Word`, `Positional::Last`, and `Positional::First` to their enums will produce non-exhaustive match errors throughout the codebase. Use these as the integration checklist: `resolve_cursor_and_mode`, `apply_positional`, `resolve_scope`, `resolve_component`, the patcher's action dispatch, all `Display` impls, and all tests that enumerate variants.
+- **Compiler-driven integration**: adding `Action::List`, `Component::Word`, `Component::Definition`, `Positional::Last`, and `Positional::First` to their enums will produce non-exhaustive match errors throughout the codebase. Use these as the integration checklist: `resolve_cursor_and_mode`, `apply_positional`, `resolve_scope`, `resolve_component`, the patcher's action dispatch, all `Display` impls, and all tests that enumerate variants.
 
-- **`is_valid_combination` interaction**: the existing `is_valid_combination(scope, component)` governs scope/component pairs and is extended with Word rules. `is_valid_list_positional(positional)` is an additive validation called only when `action == List`. The parser calls both checks independently.
+- **`is_valid_combination` interaction**: the existing `is_valid_combination(scope, component)` governs scope/component pairs and is extended with Word and Definition rules. `is_valid_list_positional(positional)` is an additive validation called only when `action == List`. The parser calls both checks independently.
 
 - **Word component independence**: Word resolution is purely text-based and never calls LSP. It is handled entirely within `resolve_word_component` using buffer text scanning, analogous to how `find_innermost_delimiter` works for the Delimiter scope. Word resolution has no dependency on the LSP engine being ready.
+
+- **Definition component and LSP**: Definition resolution requires LSP to identify the scope range (like Name, Parameters, and other LSP-scoped components). The actual definition text extraction is text-based once the scope range is known — it scans for the body opener (`{` or `=`) from the scope start. This is similar to how Contents resolution works: LSP provides the scope, then text scanning finds the delimiters.
