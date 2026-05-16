@@ -494,6 +494,7 @@ mod tests {
     use super::parse;
     use crate::data::chord_types::{
         Action, Component, Positional, Scope, is_valid_combination, is_valid_jump_combination,
+        is_valid_list_positional,
     };
 
     const ALL_ACTIONS: &[Action] = &[
@@ -505,6 +506,7 @@ mod tests {
         Action::Prepend,
         Action::Insert,
         Action::Jump,
+        Action::List,
     ];
 
     const ALL_POSITIONALS: &[Positional] = &[
@@ -517,6 +519,8 @@ mod tests {
         Positional::Entire,
         Positional::Outside,
         Positional::To,
+        Positional::First,
+        Positional::Last,
     ];
 
     const ALL_SCOPES: &[Scope] = &[
@@ -538,6 +542,8 @@ mod tests {
         Component::Arguments,
         Component::Name,
         Component::Self_,
+        Component::Word,
+        Component::Definition,
     ];
 
     #[test]
@@ -559,8 +565,22 @@ mod tests {
                             action != Action::Jump || is_valid_jump_combination(pos, comp);
                         let delimiter_positional_valid = scope != Scope::Delimiter
                             || !matches!(pos, Positional::Next | Positional::Previous);
-                        let should_parse =
-                            scope_comp_valid && jump_valid && delimiter_positional_valid;
+                        let list_positional_valid =
+                            action != Action::List || is_valid_list_positional(pos);
+                        let list_component_valid = action != Action::List
+                            || !scope.requires_lsp()
+                            || matches!(
+                                comp,
+                                Component::Name
+                                    | Component::Definition
+                                    | Component::End
+                                    | Component::Self_
+                            );
+                        let should_parse = scope_comp_valid
+                            && jump_valid
+                            && delimiter_positional_valid
+                            && list_positional_valid
+                            && list_component_valid;
                         if should_parse {
                             let q = result.unwrap_or_else(|e| {
                                 panic!("expected {short} to parse OK, got: {e}")
@@ -596,6 +616,21 @@ mod tests {
                             continue;
                         }
                         if action == Action::Jump && !is_valid_jump_combination(pos, comp) {
+                            continue;
+                        }
+                        if action == Action::List && !is_valid_list_positional(pos) {
+                            continue;
+                        }
+                        if action == Action::List
+                            && scope.requires_lsp()
+                            && !matches!(
+                                comp,
+                                Component::Name
+                                    | Component::Definition
+                                    | Component::End
+                                    | Component::Self_
+                            )
+                        {
                             continue;
                         }
                         if scope == Scope::Delimiter

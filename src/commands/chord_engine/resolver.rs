@@ -2112,7 +2112,16 @@ fn find_first_open_brace(chars: &[char]) -> Option<usize> {
 }
 
 fn find_first_open_paren(chars: &[char]) -> Option<usize> {
-    chars.iter().position(|&c| c == '(')
+    let mut angle_depth = 0i32;
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '<' => angle_depth += 1,
+            '>' => angle_depth -= 1,
+            '(' if angle_depth <= 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn char_offset_to_range(
@@ -2168,8 +2177,13 @@ fn resolve_list(
     let mut items = collect_list_candidates(query, buffer, lsp, buffer_name)?;
 
     if query.positional == Positional::Inside {
-        if let Some((cl, cc)) = query.args.cursor_pos
-            && let Ok(symbols) = lsp.document_symbols(Path::new(buffer_name))
+        let (cl, cc) = query.args.cursor_pos.ok_or_else(|| {
+            ChordError::resolve(
+                buffer_name,
+                "List with Inside positional requires a cursor position",
+            )
+        })?;
+        if let Ok(symbols) = lsp.document_symbols(Path::new(buffer_name))
             && let Some(enclosing) = find_innermost_symbol(&symbols, cl, cc)
         {
             let range = &enclosing.range;
