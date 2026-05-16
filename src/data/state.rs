@@ -13,6 +13,34 @@ pub enum Mode {
     Chord,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor_line: usize,
+    pub anchor_col: usize,
+    pub head_line: usize,
+    pub head_col: usize,
+}
+
+impl Selection {
+    pub fn ordered(&self) -> (usize, usize, usize, usize) {
+        if (self.anchor_line, self.anchor_col) <= (self.head_line, self.head_col) {
+            (
+                self.anchor_line,
+                self.anchor_col,
+                self.head_line,
+                self.head_col,
+            )
+        } else {
+            (
+                self.head_line,
+                self.head_col,
+                self.anchor_line,
+                self.anchor_col,
+            )
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct EditorState {
     pub buffers: Vec<Buffer>,
@@ -38,6 +66,7 @@ pub struct EditorState {
     pub pending_open_path: Option<PathBuf>,
     pub tree_view: Vec<FileEntry>,
     pub lsp_state: Arc<Mutex<LspSharedState>>,
+    pub selection: Option<Selection>,
 }
 
 impl EditorState {
@@ -71,6 +100,7 @@ impl EditorState {
             pending_open_path: None,
             tree_view: Vec::new(),
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
+            selection: None,
         })
     }
 
@@ -106,6 +136,7 @@ impl EditorState {
             pending_open_path: None,
             tree_view,
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
+            selection: None,
         })
     }
 
@@ -201,5 +232,38 @@ mod tests {
         assert_eq!(state.chord_cursor_col, 0);
         assert!(!state.chord_error);
         assert!(!state.chord_running);
+    }
+
+    #[test]
+    fn selection_ordered_forward_drag() {
+        let sel = Selection {
+            anchor_line: 0,
+            anchor_col: 5,
+            head_line: 2,
+            head_col: 10,
+        };
+        assert_eq!(sel.ordered(), (0, 5, 2, 10));
+    }
+
+    #[test]
+    fn selection_ordered_backward_drag() {
+        let sel = Selection {
+            anchor_line: 2,
+            anchor_col: 10,
+            head_line: 0,
+            head_col: 5,
+        };
+        assert_eq!(sel.ordered(), (0, 5, 2, 10));
+    }
+
+    #[test]
+    fn selection_ordered_same_line_backward() {
+        let sel = Selection {
+            anchor_line: 3,
+            anchor_col: 20,
+            head_line: 3,
+            head_col: 5,
+        };
+        assert_eq!(sel.ordered(), (3, 5, 3, 20));
     }
 }

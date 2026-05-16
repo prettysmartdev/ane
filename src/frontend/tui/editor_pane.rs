@@ -6,8 +6,9 @@ use ratatui::{
     widgets::{Clear, Paragraph},
 };
 
+use crate::data::buffer::Buffer;
 use crate::data::lsp::types::SemanticToken;
-use crate::data::state::{EditorState, Mode};
+use crate::data::state::{EditorState, Mode, Selection};
 
 fn token_style(token_type: &str) -> Style {
     match token_type {
@@ -134,6 +135,55 @@ pub(crate) fn wrap_row_start(offsets: &[usize], row: usize) -> usize {
     offsets.get(row).copied().unwrap_or(0)
 }
 
+pub(crate) fn screen_to_buffer(
+    x: u16,
+    y: u16,
+    area: Rect,
+    state: &EditorState,
+) -> Option<(usize, usize)> {
+    let buf = state.current_buffer()?;
+    if x < area.x || y < area.y || x >= area.right() || y >= area.bottom() {
+        return None;
+    }
+
+    let line_num_width = format!("{}", buf.line_count().saturating_sub(1)).len();
+    let gutter_end = area.x + line_num_width as u16 + 1;
+    if x < gutter_end {
+        return None;
+    }
+
+    let text_width = (area.width as usize).saturating_sub(line_num_width + 1);
+    let text_col = (x - gutter_end) as usize;
+    let target_visual_row = (y - area.y) as usize;
+
+    let mut accumulated_rows = 0;
+    let mut logical_line = state.scroll_offset;
+
+    while logical_line < buf.line_count() {
+        let line_text = &buf.lines[logical_line];
+        let row_count = visual_row_count(line_text, text_width);
+
+        if accumulated_rows + row_count > target_visual_row {
+            let wrap_row_within_line = target_visual_row - accumulated_rows;
+            let offsets = wrap_offsets(line_text, text_width);
+            let target_display_col = wrap_row_start(&offsets, wrap_row_within_line) + text_col;
+            let byte_col = byte_col_from_display(line_text, target_display_col);
+            return Some((logical_line, byte_col));
+        }
+
+        accumulated_rows += row_count;
+        logical_line += 1;
+    }
+
+    // Click below last buffer line — clamp to end of last line
+    if buf.line_count() > 0 {
+        let last = buf.line_count() - 1;
+        Some((last, buf.lines[last].len()))
+    } else {
+        Some((0, 0))
+    }
+}
+
 fn styled_line_with_tokens<'a>(
     line_text: &'a str,
     line_num: usize,
@@ -244,6 +294,79 @@ fn wrap_spans(spans: Vec<Span<'_>>, text_width: usize) -> Vec<Vec<Span<'static>>
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_selection_highlight(
+    frame: &mut Frame,
+    area: Rect,
+    buf: &Buffer,
+    sel: &Selection,
+    scroll_offset: usize,
+    line_num_width: usize,
+    text_width: usize,
+    visible_height: usize,
+) {
+    let (start_line, start_col, end_line, end_col) = sel.ordered();
+    let gutter_x = area.x + line_num_width as u16 + 1;
+    let sel_style = Style::default().bg(Color::LightBlue).fg(Color::Black);
+
+    let mut accumulated_rows = 0usize;
+    let mut line_idx = scroll_offset;
+
+    while accumulated_rows < visible_height && line_idx < buf.line_count() {
+        let line_text = &buf.lines[line_idx];
+        let offsets = wrap_offsets(line_text, text_width);
+        let row_count = offsets.len();
+
+        if line_idx >= start_line && line_idx <= end_line {
+            let sel_start_byte = if line_idx == start_line {
+                start_col.min(line_text.len())
+            } else {
+                0
+            };
+            let sel_end_byte = if line_idx == end_line {
+                end_col.min(line_text.len())
+            } else {
+                line_text.len()
+            };
+
+            let sel_start_dc = display_col(line_text, sel_start_byte);
+            let sel_end_dc = display_col(line_text, sel_end_byte);
+
+            for wrap_row in 0..row_count {
+                let screen_y = area.y + (accumulated_rows + wrap_row) as u16;
+                if screen_y >= area.bottom() {
+                    break;
+                }
+
+                let row_start_dc = offsets[wrap_row];
+                let row_end_dc = if wrap_row + 1 < offsets.len() {
+                    offsets[wrap_row + 1]
+                } else {
+                    display_col(line_text, line_text.len())
+                };
+
+                let hl_start = sel_start_dc.max(row_start_dc);
+                let hl_end = sel_end_dc.min(row_end_dc);
+
+                if hl_start < hl_end {
+                    let sx_start = gutter_x + (hl_start - row_start_dc) as u16;
+                    let sx_end = gutter_x + (hl_end - row_start_dc) as u16;
+
+                    for sx in sx_start..sx_end.min(area.right()) {
+                        if let Some(cell) = frame.buffer_mut().cell_mut(Position::new(sx, screen_y))
+                        {
+                            cell.set_style(sel_style);
+                        }
+                    }
+                }
+            }
+        }
+
+        accumulated_rows += row_count;
+        line_idx += 1;
+    }
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -329,6 +452,19 @@ pub fn render(
             let paragraph = Paragraph::new(visual_lines);
             frame.render_widget(paragraph, area);
 
+            if let Some(sel) = &state.selection {
+                render_selection_highlight(
+                    frame,
+                    area,
+                    buf,
+                    sel,
+                    state.scroll_offset,
+                    line_num_width,
+                    text_width,
+                    visible_height,
+                );
+            }
+
             if let (Some(vis_row), Some(vis_col)) = (cursor_visual_row, cursor_visual_col) {
                 let cursor_x = area.x + line_num_width as u16 + 1 + vis_col as u16;
                 let cursor_y = area.y + vis_row as u16;
@@ -373,7 +509,25 @@ pub fn render(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as IoWrite;
+
+    use ratatui::layout::Rect;
+
     use super::*;
+    use crate::data::state::EditorState;
+
+    fn make_state_with_lines(lines: &[&str]) -> (tempfile::NamedTempFile, EditorState) {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                f.write_all(b"\n").unwrap();
+            }
+            f.write_all(line.as_bytes()).unwrap();
+        }
+        f.flush().unwrap();
+        let state = EditorState::for_file(f.path()).unwrap();
+        (f, state)
+    }
 
     #[test]
     fn wrap_offsets_empty_line() {
@@ -512,5 +666,53 @@ mod tests {
             concat, line,
             "rendered spans should reconstruct the line exactly"
         );
+    }
+
+    // --- work item 0007: screen_to_buffer ---
+
+    #[test]
+    fn screen_to_buffer_basic() {
+        // 1-line buffer → line_num_width=1, gutter_end=2, text_width=28
+        // click at x=5: text_col = 5-2 = 3 → byte 3 in "hello world"
+        let (_f, state) = make_state_with_lines(&["hello world"]);
+        let area = Rect::new(0, 0, 30, 10);
+        assert_eq!(screen_to_buffer(5, 0, area, &state), Some((0, 3)));
+    }
+
+    #[test]
+    fn screen_to_buffer_gutter_click_returns_none() {
+        // x=1 < gutter_end=2 → gutter click, no position returned
+        let (_f, state) = make_state_with_lines(&["hello world"]);
+        let area = Rect::new(0, 0, 30, 10);
+        assert_eq!(screen_to_buffer(1, 0, area, &state), None);
+    }
+
+    #[test]
+    fn screen_to_buffer_below_buffer_clamps_to_end_of_last_line() {
+        // visual row 5 is past the single line; result clamps to end of line 0
+        let (_f, state) = make_state_with_lines(&["only line"]);
+        let area = Rect::new(0, 0, 30, 10);
+        assert_eq!(screen_to_buffer(5, 5, area, &state), Some((0, 9)));
+    }
+
+    #[test]
+    fn screen_to_buffer_soft_wrap_click_on_second_visual_row() {
+        // "hello world" with text_width=8 wraps: row 0 = "hello ", row 1 = "world"
+        // (wrap_offsets = [0, 6]).  A click at visual row 1, column 0 in the text
+        // area maps to display col 6 → byte 6 (the 'w' in "world").
+        let (_f, state) = make_state_with_lines(&["hello world"]);
+        // area.width=10 → text_width = 10 - 1(gutter) - 1(sep) = 8
+        let area = Rect::new(0, 0, 10, 10);
+        // x=2 (gutter_end), y=1 → text_col=0, visual_row=1
+        assert_eq!(screen_to_buffer(2, 1, area, &state), Some((0, 6)));
+    }
+
+    #[test]
+    fn screen_to_buffer_tab_expansion() {
+        // "\thello": tab = 4 display cols (byte 0), then h(1) e(2) l(3) l(4) o(5).
+        // Display col 8 = 'o' at byte 5.  x=10 → text_col = 10-2 = 8.
+        let (_f, state) = make_state_with_lines(&["\thello"]);
+        let area = Rect::new(0, 0, 30, 10);
+        assert_eq!(screen_to_buffer(10, 0, area, &state), Some((0, 5)));
     }
 }

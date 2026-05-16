@@ -242,6 +242,7 @@ mod tests {
             pending_open_path: None,
             tree_view,
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
+            selection: None,
         }
     }
 

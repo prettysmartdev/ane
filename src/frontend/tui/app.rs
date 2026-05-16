@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,7 +7,10 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
@@ -20,7 +23,7 @@ use crate::commands::chord_engine::{ChordEngine, parens_balanced};
 use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
 use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
-use crate::data::state::{EditorState, Mode};
+use crate::data::state::{EditorState, Mode, Selection};
 
 use super::chord_box;
 use super::editor_pane;
@@ -60,6 +63,65 @@ fn snap_to_char_boundary(s: &str, pos: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+/// Delete the currently-selected range from the active buffer, place the
+/// cursor at the start of the selection, and clear the selection. Returns
+/// true if any buffer content was removed.
+fn delete_selection(state: &mut EditorState) -> bool {
+    let sel = match state.selection {
+        Some(s) => s,
+        None => return false,
+    };
+    let (start_line, start_col, end_line, end_col) = sel.ordered();
+
+    let buf = match state.buffers.get_mut(state.active_buffer) {
+        Some(b) => b,
+        None => {
+            state.selection = None;
+            return false;
+        }
+    };
+
+    if buf.lines.is_empty() || start_line >= buf.lines.len() {
+        state.selection = None;
+        return false;
+    }
+
+    let start_col = snap_to_char_boundary(&buf.lines[start_line], start_col);
+    let modified;
+
+    if start_line == end_line {
+        let end_col = snap_to_char_boundary(&buf.lines[start_line], end_col);
+        if start_col < end_col {
+            buf.lines[start_line].drain(start_col..end_col);
+            buf.dirty = true;
+            modified = true;
+        } else {
+            modified = false;
+        }
+    } else {
+        let last_line = end_line.min(buf.lines.len() - 1);
+        let suffix = if end_line < buf.lines.len() {
+            let ec = snap_to_char_boundary(&buf.lines[end_line], end_col);
+            buf.lines[end_line][ec..].to_string()
+        } else {
+            String::new()
+        };
+        buf.lines[start_line].truncate(start_col);
+        buf.lines[start_line].push_str(&suffix);
+        let drain_end = (last_line + 1).min(buf.lines.len());
+        if drain_end > start_line + 1 {
+            buf.lines.drain(start_line + 1..drain_end);
+        }
+        buf.dirty = true;
+        modified = true;
+    }
+
+    state.cursor_line = start_line;
+    state.cursor_col = start_col;
+    state.selection = None;
+    modified
 }
 
 fn compute_text_width(state: &EditorState, term_width: u16) -> usize {
@@ -295,6 +357,7 @@ pub fn run(path: &Path) -> Result<()> {
 
     enable_raw_mode()?;
     io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -312,6 +375,7 @@ pub fn run(path: &Path) -> Result<()> {
         let mut eng = engine.lock().unwrap();
         eng.shutdown_all();
     }
+    io::stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     io::stdout().execute(LeaveAlternateScreen)?;
 
@@ -398,21 +462,33 @@ fn event_loop(
             return Ok(());
         }
 
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            let buffer_modified = handle_key(
-                state,
-                frontend,
-                engine,
-                key.code,
-                key.modifiers,
-                syntax_engine,
-                &lsp_statuses,
-                term_size.width,
-            );
-            if buffer_modified && let Some(buf) = state.current_buffer() {
-                syntax_engine.compute(&buf.path, &buf.content());
+        let editor_area =
+            compute_editor_render_area(state, Rect::new(0, 0, term_size.width, term_size.height));
+
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    let buffer_modified = handle_key(
+                        state,
+                        frontend,
+                        engine,
+                        key.code,
+                        key.modifiers,
+                        syntax_engine,
+                        &lsp_statuses,
+                        term_size.width,
+                    );
+                    if buffer_modified {
+                        state.selection = None;
+                        if let Some(buf) = state.current_buffer() {
+                            syntax_engine.compute(&buf.path, &buf.content());
+                        }
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    handle_mouse(state, mouse, editor_area);
+                }
+                _ => {}
             }
         }
     }
@@ -480,18 +556,23 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
     }
 }
 
-fn draw(
-    frame: &mut ratatui::Frame,
-    state: &EditorState,
-    tokens: &[SemanticToken],
-    lsp_statuses: &[(Language, ServerState)],
-) {
+struct PaneLayout {
+    tree_area: Rect,
+    title_area: Rect,
+    pane_area: Rect,
+    status_area: Rect,
+    editor_render_area: Rect,
+    has_tree: bool,
+    chord_box_visible: bool,
+}
+
+fn compute_pane_layout(state: &EditorState, total: Rect) -> PaneLayout {
     let has_tree = state.file_tree.is_some() && state.focus_tree;
 
     let h_constraints = if has_tree {
         let content_w = tree_pane::content_width(&state.tree_view) as u16;
         let desired = content_w + 3;
-        let max_w = frame.area().width / 2;
+        let max_w = total.width / 2;
         let tree_w = desired.min(max_w);
         vec![Constraint::Length(tree_w), Constraint::Min(0)]
     } else {
@@ -501,14 +582,10 @@ fn draw(
     let h_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(h_constraints)
-        .split(frame.area());
+        .split(total);
 
     let tree_area = h_layout[0];
     let editor_area = h_layout[1];
-
-    if has_tree {
-        tree_pane::render(frame, tree_area, state);
-    }
 
     let v_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -523,8 +600,6 @@ fn draw(
     let pane_area = v_layout[1];
     let status_area = v_layout[2];
 
-    title_bar::render(frame, title_area, state);
-
     let chord_box_visible = state.mode == Mode::Chord && !state.focus_tree;
     let editor_render_area = if chord_box_visible {
         Rect::new(
@@ -536,11 +611,40 @@ fn draw(
     } else {
         pane_area
     };
-    editor_pane::render(frame, editor_render_area, state, tokens);
-    status_bar::render(frame, status_area, state, lsp_statuses);
 
-    if chord_box_visible {
-        chord_box::render(frame, pane_area, state);
+    PaneLayout {
+        tree_area,
+        title_area,
+        pane_area,
+        status_area,
+        editor_render_area,
+        has_tree,
+        chord_box_visible,
+    }
+}
+
+fn compute_editor_render_area(state: &EditorState, term_size: Rect) -> Rect {
+    compute_pane_layout(state, term_size).editor_render_area
+}
+
+fn draw(
+    frame: &mut ratatui::Frame,
+    state: &EditorState,
+    tokens: &[SemanticToken],
+    lsp_statuses: &[(Language, ServerState)],
+) {
+    let layout = compute_pane_layout(state, frame.area());
+
+    if layout.has_tree {
+        tree_pane::render(frame, layout.tree_area, state);
+    }
+
+    title_bar::render(frame, layout.title_area, state);
+    editor_pane::render(frame, layout.editor_render_area, state, tokens);
+    status_bar::render(frame, layout.status_area, state, lsp_statuses);
+
+    if layout.chord_box_visible {
+        chord_box::render(frame, layout.pane_area, state);
     }
 
     if state.pending_open_path.is_some() {
@@ -585,6 +689,21 @@ fn handle_key(
             let _ = buf.write();
         }
         state.status_msg = "saved".into();
+        return false;
+    }
+
+    // Priority 3c: Ctrl-Y yanks the active selection to the clipboard.
+    // The selection is cleared after copying so the highlight and the
+    // status-bar hint both disappear.
+    if code == KeyCode::Char('y') && modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(sel) = state.selection {
+            let text = extract_selection_text(state, &sel);
+            if !text.is_empty() {
+                write_osc52(&text);
+                state.status_msg = format!("copied {} chars", text.chars().count());
+            }
+            state.selection = None;
+        }
         return false;
     }
 
@@ -828,6 +947,7 @@ fn handle_chord_mode(
         KeyCode::Esc => {
             clear_chord(state);
             state.status_msg.clear();
+            state.selection = None;
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
             let col = state.chord_cursor_col.min(state.chord_input.len());
@@ -919,11 +1039,13 @@ fn handle_edit_mode(
             state.mode = Mode::Chord;
             state.status_msg.clear();
             clear_chord(state);
+            state.selection = None;
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             state.show_exit_modal = true;
         }
         KeyCode::Tab => {
+            modified |= delete_selection(state);
             let line = state.cursor_line;
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer)
@@ -951,6 +1073,7 @@ fn handle_edit_mode(
             move_cursor_right(state);
         }
         KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            modified |= delete_selection(state);
             let line = state.cursor_line;
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer)
@@ -964,33 +1087,40 @@ fn handle_edit_mode(
             }
         }
         KeyCode::Backspace => {
-            let line = state.cursor_line;
-            let col = state.cursor_col;
-            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                let snapped = if line < buf.lines.len() {
-                    snap_to_char_boundary(&buf.lines[line], col)
-                } else {
-                    0
-                };
-                if snapped > 0 && line < buf.lines.len() {
-                    let prev = prev_char_boundary(&buf.lines[line], snapped);
-                    buf.lines[line].drain(prev..snapped);
-                    buf.dirty = true;
-                    state.cursor_col = prev;
-                    modified = true;
-                } else if snapped == 0 && line > 0 {
-                    let current_line = buf.lines.remove(line);
-                    buf.dirty = true;
-                    let prev_line = line - 1;
-                    let prev_len = buf.lines[prev_line].len();
-                    buf.lines[prev_line].push_str(&current_line);
-                    state.cursor_line = prev_line;
-                    state.cursor_col = prev_len;
-                    modified = true;
+            // Backspace on an active selection just deletes the selection —
+            // no extra character is removed.
+            if state.selection.is_some() {
+                modified |= delete_selection(state);
+            } else {
+                let line = state.cursor_line;
+                let col = state.cursor_col;
+                if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                    let snapped = if line < buf.lines.len() {
+                        snap_to_char_boundary(&buf.lines[line], col)
+                    } else {
+                        0
+                    };
+                    if snapped > 0 && line < buf.lines.len() {
+                        let prev = prev_char_boundary(&buf.lines[line], snapped);
+                        buf.lines[line].drain(prev..snapped);
+                        buf.dirty = true;
+                        state.cursor_col = prev;
+                        modified = true;
+                    } else if snapped == 0 && line > 0 {
+                        let current_line = buf.lines.remove(line);
+                        buf.dirty = true;
+                        let prev_line = line - 1;
+                        let prev_len = buf.lines[prev_line].len();
+                        buf.lines[prev_line].push_str(&current_line);
+                        state.cursor_line = prev_line;
+                        state.cursor_col = prev_len;
+                        modified = true;
+                    }
                 }
             }
         }
         KeyCode::Enter => {
+            modified |= delete_selection(state);
             let line = state.cursor_line;
             let col = state.cursor_col;
             if let Some(buf) = state.buffers.get_mut(state.active_buffer)
@@ -1152,6 +1282,85 @@ fn current_file_lsp_status(
     ServerState::Undetected
 }
 
+fn handle_mouse(state: &mut EditorState, mouse: MouseEvent, editor_area: Rect) {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some((line, col)) =
+                editor_pane::screen_to_buffer(mouse.column, mouse.row, editor_area, state)
+            {
+                state.cursor_line = line;
+                state.cursor_col = col;
+                state.selection = Some(Selection {
+                    anchor_line: line,
+                    anchor_col: col,
+                    head_line: line,
+                    head_col: col,
+                });
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if state.selection.is_some() => {
+            if let Some((line, col)) =
+                editor_pane::screen_to_buffer(mouse.column, mouse.row, editor_area, state)
+            {
+                let sel = state.selection.as_mut().unwrap();
+                sel.head_line = line;
+                sel.head_col = col;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(sel) = state.selection
+                && sel.anchor_line == sel.head_line
+                && sel.anchor_col == sel.head_col
+            {
+                state.selection = None;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extract_selection_text(state: &EditorState, sel: &Selection) -> String {
+    let (start_line, start_col, end_line, end_col) = sel.ordered();
+    let buf = match state.current_buffer() {
+        Some(b) => b,
+        None => return String::new(),
+    };
+    let mut result = String::new();
+    for i in start_line..=end_line {
+        let line = match buf.lines.get(i) {
+            Some(l) => l,
+            None => break,
+        };
+        let from = if i == start_line {
+            snap_to_char_boundary(line, start_col)
+        } else {
+            0
+        };
+        let to = if i == end_line {
+            snap_to_char_boundary(line, end_col)
+        } else {
+            line.len()
+        };
+        if from <= to {
+            result.push_str(&line[from..to]);
+        }
+        if i < end_line {
+            result.push('\n');
+        }
+    }
+    result
+}
+
+fn write_osc52(text: &str) {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let encoded = BASE64.encode(text.as_bytes());
+    let seq = format!("\x1b]52;c;{}\x07", encoded);
+    let _ = io::stdout().write_all(seq.as_bytes());
+    let _ = io::stdout().flush();
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -1162,7 +1371,8 @@ mod tests {
     use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
     use crate::commands::syntax_engine::SyntaxEngine;
     use crate::data::lsp::types::SemanticToken;
-    use crate::data::state::EditorState;
+    use crate::data::state::{EditorState, Mode, Selection};
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn tok(line: usize, start_col: usize, length: usize, token_type: &str) -> SemanticToken {
         SemanticToken {
@@ -1294,5 +1504,310 @@ mod tests {
         state.cursor_line = 5;
         adjust_scroll_offset(&mut state, 20, 80);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    // --- work item 0007: extract_selection_text, write_osc52, selection clearing ---
+
+    #[test]
+    fn extract_selection_text_single_line() {
+        let (_f, state) = make_state_with_lines(&["hello world"]);
+        let sel = Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 5,
+        };
+        assert_eq!(extract_selection_text(&state, &sel), "hello");
+    }
+
+    #[test]
+    fn extract_selection_text_multi_line() {
+        let (_f, state) = make_state_with_lines(&["aaa", "bbb", "ccc"]);
+        let sel = Selection {
+            anchor_line: 0,
+            anchor_col: 1,
+            head_line: 2,
+            head_col: 2,
+        };
+        assert_eq!(extract_selection_text(&state, &sel), "aa\nbbb\ncc");
+    }
+
+    #[test]
+    fn extract_selection_text_clamped_to_line_length() {
+        let (_f, state) = make_state_with_lines(&["short"]);
+        let sel = Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 100,
+        };
+        assert_eq!(extract_selection_text(&state, &sel), "short");
+    }
+
+    #[test]
+    fn extract_selection_text_empty_when_anchor_equals_head() {
+        let (_f, state) = make_state_with_lines(&["hello"]);
+        let sel = Selection {
+            anchor_line: 0,
+            anchor_col: 2,
+            head_line: 0,
+            head_col: 2,
+        };
+        assert_eq!(extract_selection_text(&state, &sel), "");
+    }
+
+    #[test]
+    fn write_osc52_produces_correct_escape_sequence_format() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        let text = "hello";
+        let encoded = BASE64.encode(text.as_bytes());
+        assert_eq!(encoded, "aGVsbG8=");
+        let expected = format!("\x1b]52;c;{}\x07", encoded);
+        assert_eq!(expected, "\x1b]52;c;aGVsbG8=\x07");
+        write_osc52(text);
+    }
+
+    #[test]
+    fn typing_in_edit_mode_with_selection_replaces_selection() {
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.mode = Mode::Edit;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 5,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Char('X'), KeyModifiers::empty(), 80);
+        assert!(modified);
+        assert!(state.selection.is_none());
+        assert_eq!(state.current_buffer().unwrap().lines[0], "X world");
+        assert_eq!(state.cursor_line, 0);
+        assert_eq!(state.cursor_col, 1);
+    }
+
+    #[test]
+    fn backspace_in_edit_mode_with_selection_deletes_only_the_selection() {
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.mode = Mode::Edit;
+        state.cursor_col = 11;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 5,
+            head_line: 0,
+            head_col: 11,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Backspace, KeyModifiers::empty(), 80);
+        assert!(modified);
+        assert!(state.selection.is_none());
+        assert_eq!(state.current_buffer().unwrap().lines[0], "hello");
+        assert_eq!(state.cursor_col, 5, "cursor lands at the selection start");
+    }
+
+    #[test]
+    fn enter_in_edit_mode_with_selection_replaces_with_newline() {
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.mode = Mode::Edit;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 5,
+            head_line: 0,
+            head_col: 6,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Enter, KeyModifiers::empty(), 80);
+        assert!(modified);
+        assert!(state.selection.is_none());
+        let lines = &state.current_buffer().unwrap().lines;
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], "world");
+        assert_eq!(state.cursor_line, 1);
+        assert_eq!(state.cursor_col, 0);
+    }
+
+    #[test]
+    fn tab_in_edit_mode_with_selection_replaces_with_tab() {
+        let (_f, mut state) = make_state_with_lines(&["abcdef"]);
+        state.mode = Mode::Edit;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 1,
+            head_line: 0,
+            head_col: 4,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Tab, KeyModifiers::empty(), 80);
+        assert!(modified);
+        assert!(state.selection.is_none());
+        assert_eq!(state.current_buffer().unwrap().lines[0], "a\tef");
+        assert_eq!(state.cursor_col, 2);
+    }
+
+    #[test]
+    fn type_with_multi_line_selection_replaces_across_lines() {
+        let (_f, mut state) = make_state_with_lines(&["aaa", "bbb", "ccc"]);
+        state.mode = Mode::Edit;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 1,
+            head_line: 2,
+            head_col: 2,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Char('Z'), KeyModifiers::empty(), 80);
+        assert!(modified);
+        let lines = &state.current_buffer().unwrap().lines;
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "aZc");
+        assert_eq!(state.cursor_line, 0);
+        assert_eq!(state.cursor_col, 2);
+    }
+
+    #[test]
+    fn ctrl_e_with_selection_switches_mode_but_keeps_selection() {
+        let (_f, mut state) = make_state_with_lines(&["hello"]);
+        state.mode = Mode::Edit;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 3,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Char('e'), KeyModifiers::CONTROL, 80);
+        assert!(!modified);
+        assert_eq!(state.mode, Mode::Chord);
+        assert!(
+            state.selection.is_some(),
+            "Ctrl-E must not clear the selection"
+        );
+    }
+
+    #[test]
+    fn typing_in_chord_mode_does_not_touch_selection_or_buffer() {
+        let (_f, mut state) = make_state_with_lines(&["hello"]);
+        state.mode = Mode::Chord;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 3,
+        });
+
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        let mut frontend = TuiFrontend::new();
+
+        let modified = handle_chord_mode(
+            &mut state,
+            &mut frontend,
+            &engine,
+            KeyCode::Char('q'),
+            KeyModifiers::empty(),
+            &mut syntax,
+            &[],
+            80,
+        );
+        assert!(!modified);
+        assert_eq!(state.chord_input, "q", "char keyed into chord input");
+        assert_eq!(
+            state.current_buffer().unwrap().lines[0],
+            "hello",
+            "buffer untouched"
+        );
+        assert!(
+            state.selection.is_some(),
+            "selection must survive chord-mode typing"
+        );
+    }
+
+    #[test]
+    fn selection_persists_across_non_modifying_key() {
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.mode = Mode::Edit;
+        state.cursor_col = 5;
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 5,
+        });
+        let modified = handle_edit_mode(&mut state, KeyCode::Left, KeyModifiers::empty(), 80);
+        assert!(!modified, "cursor move must not report buffer modification");
+        if modified {
+            state.selection = None;
+        }
+        assert!(
+            state.selection.is_some(),
+            "selection must persist across cursor-move keys"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_copies_selection_and_clears_it() {
+        // We can't easily capture stdout from inside the test process, but we
+        // can verify the handler's side effects on state: selection cleared
+        // and a status message set with the copied character count.
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.selection = Some(Selection {
+            anchor_line: 0,
+            anchor_col: 0,
+            head_line: 0,
+            head_col: 5,
+        });
+
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        let mut frontend = TuiFrontend::new();
+
+        let modified = handle_key(
+            &mut state,
+            &mut frontend,
+            &engine,
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+            &mut syntax,
+            &[],
+            80,
+        );
+        assert!(!modified, "Ctrl-Y must not modify the buffer");
+        assert!(
+            state.selection.is_none(),
+            "selection must be cleared after Ctrl-Y"
+        );
+        assert_eq!(state.status_msg, "copied 5 chars");
+    }
+
+    #[test]
+    fn ctrl_y_with_empty_selection_does_nothing() {
+        let (_f, mut state) = make_state_with_lines(&["hello"]);
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        let mut frontend = TuiFrontend::new();
+
+        let modified = handle_key(
+            &mut state,
+            &mut frontend,
+            &engine,
+            KeyCode::Char('y'),
+            KeyModifiers::CONTROL,
+            &mut syntax,
+            &[],
+            80,
+        );
+        assert!(!modified);
+        assert!(state.selection.is_none());
+        assert!(
+            state.status_msg.is_empty(),
+            "no status message when there's nothing to copy"
+        );
     }
 }

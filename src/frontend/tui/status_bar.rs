@@ -44,7 +44,14 @@ fn render_inner(
     let lsp_spans = build_lsp_indicator_spans(lsp_statuses);
     let lsp_char_len: usize = lsp_spans.iter().map(|s| s.content.chars().count()).sum();
 
-    let fixed_len = mode_text.len() + lsp_char_len;
+    let hint_text: &str = if state.selection.is_some() {
+        " Ctrl-Y: copy "
+    } else {
+        ""
+    };
+    let hint_char_len = hint_text.chars().count();
+
+    let fixed_len = mode_text.len() + lsp_char_len + hint_char_len;
     let available = width.saturating_sub(fixed_len);
 
     let (msg_text, msg_color) = if let Some(il) = install_line {
@@ -79,7 +86,19 @@ fn render_inner(
         )
     };
 
-    let mut spans = vec![mode_span, msg_span, pad_span];
+    let hint_span = if hint_text.is_empty() {
+        Span::raw("")
+    } else {
+        Span::styled(
+            hint_text,
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+
+    let mut spans = vec![mode_span, msg_span, pad_span, hint_span];
     spans.extend(lsp_spans);
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);

@@ -45,13 +45,14 @@ tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-md = "0.5"
 
+base64 = { version = "0.22", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 ratatui = { version = "0.29", optional = true }
 
 [features]
 default = ["frontends"]
-frontends = ["dep:clap", "dep:crossterm", "dep:ratatui"]
+frontends = ["dep:base64", "dep:clap", "dep:crossterm", "dep:ratatui"]
 test-support = []
 
 [dev-dependencies]
