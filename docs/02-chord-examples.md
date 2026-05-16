@@ -668,19 +668,311 @@ Other components with Outside are invalid.
 
 ---
 
+## List Action
+
+The `List` action collects matching items and displays them in an interactive overlay (TUI) or prints them to stdout (CLI). Unlike modification actions, List produces no diff.
+
+### List + Function Name
+
+Lists all function names in the buffer or a specific scope.
+
+```
+lefn                        ListEntireFunctionName
+lafn(cursor:"5,0")          ListAfterFunctionName
+llfn                        ListLastFunctionName
+lffn                        ListFirstFunctionName
+```
+
+In TUI, this opens a scrollable dialog:
+
+```
+┌─────────────────────────────────────┐
+│ List Results                        │
+├─────────────────────────────────────┤
+│ setup                    (line 1)   │
+│ initialize               (line 8)   │
+│ process_data             (line 15)  │
+│ cleanup                  (line 22)  │
+└─────────────────────────────────────┘
+```
+
+Use arrow keys to navigate, press Enter to jump, Escape to close.
+
+In CLI, this prints to stdout:
+
+```
+$ ane exec file.rs lefn
+1:1   setup
+8:1   initialize
+15:1  process_data
+22:1  cleanup
+```
+
+### List + Function Definition
+
+Lists function signatures (declarations without bodies).
+
+```
+lefd                        ListEntireFunctionDefinition
+```
+
+```rust
+// buffer with three functions
+pub fn setup() {
+    // body
+}
+
+fn initialize(config: Config) -> Result<()> {
+    // body
+}
+
+async fn process(&mut self) -> Vec<Item> {
+    // body
+}
+```
+
+With `lefd`, the dialog shows:
+
+```
+┌─────────────────────────────────────────────┐
+│ List Results                                │
+├─────────────────────────────────────────────┤
+│ pub fn setup()                  (line 1)    │
+│ fn initialize(config: Config..  (line 5)    │
+│ async fn process(&mut self)..   (line 10)   │
+└─────────────────────────────────────────────┘
+```
+
+Each item displays the full function signature up to (but not including) the opening brace.
+
+### List + Struct Name
+
+Lists struct (and enum) names, respecting the positional filter.
+
+```
+lesn                        ListEntireStructName
+lisn(cursor:"12,0")         ListInsideStructName
+```
+
+---
+
+## Word Component
+
+A word is a maximal run of non-whitespace characters. Word is text-based and requires no LSP.
+
+### Line + Word
+
+#### Jump to word
+
+```
+jnlw                        JumpNextLineWord
+jplw                        JumpPreviousLineWord
+jflw                        JumpFirstLineWord
+jllw                        JumpLastLineWord
+jElw(cursor:"0,8")          JumpEntireLineWord
+```
+
+```rust
+// before: cursor on first word
+let config = Config::default();
+│
+│ jflw: jumps to "let" (first word)
+│ jnlw: jumps to "config" (next word)
+│ jllw: jumps to "default" (last word)
+```
+
+#### Change a word
+
+```
+celw(cursor:"0,4", value:"mut x")          ChangeEntireLineWord
+```
+
+```rust
+// before
+let value = 42;
+    │
+    cursor is on "value"
+
+// after
+let mut x = 42;
+```
+
+### Buffer + Word
+
+Lists or operates on words across the entire file.
+
+```
+lelw                        ListEntireLineWord
+lewb(target:"config")       YankEntireBufferWord
+```
+
+---
+
+## Definition Component
+
+The Definition component targets the declaration part of a scope, excluding the body.
+
+### Function Definition
+
+The definition includes visibility, keyword, name, parameters, and return type, but excludes the brace block.
+
+```
+lefd                        ListEntireFunctionDefinition
+cefd(target:process)        ChangeEntireFunctionDefinition
+yevd(target:init)           YankEntireFunctionDefinition (same as lefd, but only one item)
+defd(target:helper)         DeleteEntireFunctionDefinition
+```
+
+```rust
+// before: changing the signature of process()
+pub fn process(old_arg: String) -> bool {
+    println!("working");
+    true
+}
+
+// chord: cefd(target:process, value:"fn process(new_arg: &str) -> Result<()>")
+// after
+fn process(new_arg: &str) -> Result<()> {
+    println!("working");
+    true
+}
+```
+
+The body remains untouched; only the signature is replaced.
+
+For trait methods and extern functions (no brace body), Definition is the full scope excluding the trailing semicolon:
+
+```rust
+// trait method
+fn required_fn(&self) -> String;
+          │
+          Definition component includes everything except the semicolon
+
+// after cefd: entire line is replaced with the new signature
+```
+
+### Variable Definition
+
+For variables, Definition includes the keyword, name, and type annotation, but excludes the assignment (RHS).
+
+```
+yevd(target:config)         YankEntireVariableDefinition
+```
+
+```rust
+// buffer
+let config: Config = Config::default();
+
+// yevd(target:config) yanks: "let config: Config"
+// (excludes the "= Config::default()" part)
+
+let my_count: i32 = 0;
+
+// yevd(target:my_count) yanks: "let my_count: i32"
+```
+
+### Struct Definition
+
+For structs and enums, Definition includes visibility, keyword, name, and generic parameters, but excludes the brace block.
+
+```
+lefd                        ListEntireStructDefinition
+cesd(target:Config)         ChangeEntireStructDefinition
+```
+
+```rust
+// before: changing a struct's signature
+pub struct Config<T> {
+    field: T,
+    count: usize,
+}
+
+// chord: cesd(target:Config, value:"struct SimpleConfig")
+// after
+struct SimpleConfig {
+    field: T,
+    count: usize,
+}
+```
+
+---
+
+## Last and First Positionals
+
+These select the last (or first) occurrence of a component within a scope.
+
+### Last Positional
+
+```
+jlfn                        JumpLastFunctionName
+jlfn(target:outer)          JumpLastFunctionName (inside outer function)
+celmn                       ChangeEntireLastMemberName
+```
+
+```rust
+// buffer with multiple functions
+fn outer() {
+    fn inner_one() { }
+    let x = 10;
+    fn inner_two() { }
+}
+
+// with cursor inside outer:
+jlfn     → jumps to inner_two (last function in the buffer)
+jlfn(target:outer) → jumps to inner_two (last function inside outer)
+```
+
+### First Positional
+
+```
+jffn                        JumpFirstFunctionName
+jffn(target:outer)          JumpFirstFunctionName (inside outer function)
+```
+
+```rust
+// buffer with multiple functions
+fn outer() {
+    fn inner_one() { }
+    let x = 10;
+    fn inner_two() { }
+}
+
+// with cursor inside outer:
+jffn     → jumps to inner_one (first function in the buffer)
+jffn(target:outer) → jumps to inner_one (first function inside outer)
+```
+
+### First and Last with Word
+
+```
+jflw                        JumpFirstLineWord
+jllw                        JumpLastLineWord
+```
+
+```rust
+// line: "  let mut config = Config::new();"
+//         │                                  │
+//       first                              last
+
+jflw  →  cursor jumps to "let"
+jllw  →  cursor jumps to "new"
+```
+
+---
+
 ## Scope/component validity matrix
 
 A chord with an invalid scope/component combination is rejected at parse time.
 
-|              | Beginning | Contents | End | Value | Parameters | Arguments | Name | Self |
-|--------------|:---------:|:--------:|:---:|:-----:|:----------:|:---------:|:----:|:----:|
-| **Line**       | Y         | --       | Y   | --    | --         | --        | Y    | Y    |
-| **Buffer**     | Y         | --       | Y   | --    | --         | --        | Y    | Y    |
-| **Function**   | --        | Y        | Y   | --    | Y          | Y         | Y    | Y    |
-| **Variable**   | --        | --       | Y   | Y     | --         | --        | Y    | Y    |
-| **Struct**     | --        | Y        | Y   | --    | --         | --        | Y    | Y    |
-| **Member**     | --        | --       | Y   | Y     | --         | --        | Y    | Y    |
-| **Delimiter**  | Y         | Y        | Y   | --    | --         | --        | Y    | Y    |
+|              | Beginning | Contents | End | Value | Parameters | Arguments | Name | Self | Word | Definition |
+|--------------|:---------:|:--------:|:---:|:-----:|:----------:|:---------:|:----:|:----:|:----:|:----------:|
+| **Line**       | Y         | --       | Y   | --    | --         | --        | Y    | Y    | Y    | --         |
+| **Buffer**     | Y         | --       | Y   | --    | --         | --        | Y    | Y    | Y    | --         |
+| **Function**   | --        | Y        | Y   | --    | Y          | Y         | Y    | Y    | --   | Y          |
+| **Variable**   | --        | --       | Y   | Y     | --         | --        | Y    | Y    | --   | Y          |
+| **Struct**     | --        | Y        | Y   | --    | --         | --        | Y    | Y    | --   | Y          |
+| **Member**     | --        | --       | Y   | Y     | --         | --        | Y    | Y    | --   | --         |
+| **Delimiter**  | Y         | Y        | Y   | --    | --         | --        | Y    | Y    | --   | --         |
 
 ---
 

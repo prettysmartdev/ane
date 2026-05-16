@@ -43,6 +43,19 @@ fn build_action(
         return Err(ChordError::patch(buffer_name, "no target ranges resolved").into());
     }
 
+    if query.action == Action::List {
+        return Ok(ChordAction {
+            buffer_name: buffer_name.to_string(),
+            diff: None,
+            yanked_content: None,
+            cursor_destination: None,
+            mode_after: None,
+            highlight_ranges: vec![],
+            warnings: vec![],
+            listed_items: resolution.listed_items.clone(),
+        });
+    }
+
     if query.action == Action::Yank {
         let yanked = resolution
             .target_ranges
@@ -58,6 +71,7 @@ fn build_action(
             mode_after: resolution.mode_after,
             highlight_ranges: resolution.target_ranges.clone(),
             warnings,
+            listed_items: vec![],
         });
     }
 
@@ -125,7 +139,7 @@ fn build_action(
                 });
             apply_single_replacement(buffer, &cursor, insertion)
         }
-        Action::Yank => unreachable!(),
+        Action::Yank | Action::List => unreachable!(),
         Action::Jump => {
             return Ok(ChordAction {
                 buffer_name: buffer_name.to_string(),
@@ -135,6 +149,7 @@ fn build_action(
                 mode_after: resolution.mode_after,
                 highlight_ranges: vec![resolution.component_range],
                 warnings: vec![],
+                listed_items: vec![],
             });
         }
     };
@@ -149,6 +164,7 @@ fn build_action(
         mode_after: resolution.mode_after,
         highlight_ranges: resolution.target_ranges.clone(),
         warnings,
+        listed_items: vec![],
     })
 }
 
@@ -229,8 +245,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::commands::chord_engine::types::{
-        BufferResolution, ChordArgs, ChordQuery, CursorPosition, EditorMode, ResolvedChord,
-        TextRange,
+        BufferResolution, ChordArgs, ChordQuery, CursorPosition, EditorMode, ListItem,
+        ResolvedChord, TextRange,
     };
     use crate::data::buffer::Buffer;
     use crate::data::chord_types::{Action, Component, Positional, Scope};
@@ -270,6 +286,7 @@ mod tests {
             replacement: replacement.map(String::from),
             cursor_destination: cursor,
             mode_after: mode,
+            listed_items: vec![],
         }
     }
 
@@ -285,6 +302,7 @@ mod tests {
             replacement: replacement.map(String::from),
             cursor_destination: None,
             mode_after: None,
+            listed_items: vec![],
         }
     }
 
@@ -700,6 +718,57 @@ mod tests {
         let all_lines: Vec<&DiffLine> = diff.hunks.iter().flat_map(|h| h.lines.iter()).collect();
         assert!(all_lines.iter().any(|l| matches!(l, DiffLine::Removed(_))));
         assert!(all_lines.iter().any(|l| matches!(l, DiffLine::Added(_))));
+    }
+
+    // --- work item 0011: List action ---
+
+    #[test]
+    fn list_action_has_no_diff_and_populates_listed_items() {
+        let name = "test_buf";
+        let buffer = buf(&["fn foo() {}", "fn bar() {}"]);
+        let mut query = make_query(Action::List);
+        query.scope = Scope::Function;
+        query.component = Component::Name;
+        let target = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 1,
+            end_col: 11,
+        };
+        let resolution = BufferResolution {
+            target_ranges: vec![target],
+            scope_range: target,
+            component_range: target,
+            replacement: None,
+            cursor_destination: None,
+            mode_after: None,
+            listed_items: vec![
+                ListItem { val: "foo".to_string(), line: 0, col: 3 },
+                ListItem { val: "bar".to_string(), line: 1, col: 3 },
+            ],
+        };
+        let mut resolutions = HashMap::new();
+        resolutions.insert(name.to_string(), resolution);
+        let resolved = ResolvedChord { query, resolutions };
+        let mut buffers = HashMap::new();
+        buffers.insert(name.to_string(), buffer);
+        let action = patch(&resolved, &buffers).unwrap().remove(name).unwrap();
+        assert!(action.diff.is_none());
+        assert_eq!(action.listed_items.len(), 2);
+        assert_eq!(action.listed_items[0].val, "foo");
+        assert_eq!(action.listed_items[1].val, "bar");
+    }
+
+    #[test]
+    fn non_list_action_has_empty_listed_items() {
+        let target = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 6,
+        };
+        let action = run_patch(Action::Yank, &["foobar"], target, None, None, None);
+        assert!(action.listed_items.is_empty());
     }
 
     #[test]

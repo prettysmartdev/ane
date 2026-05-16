@@ -38,6 +38,7 @@ The action determines what happens to the resolved text range.
 | `p` | Prepend | Insert `value` immediately **before** the start of the target range. |
 | `i` | Insert | Insert `value` at the cursor position (falls back to target start if no cursor). |
 | `j` | Jump | Move the cursor to the target position. TUI-only -- the CLI rejects Jump chords. Produces no diff. |
+| `l` | List | Collect all matching items as a list. In the TUI, shows a scrollable overlay where you can navigate with arrow keys and press Enter to jump to the selected item. In the CLI, prints each item with its line and column number. Produces no diff. |
 
 ---
 
@@ -56,6 +57,8 @@ The positional narrows or shifts the component range relative to the scope.
 | `o` | Outside | Everything in the scope **except** the component (may produce two disjoint ranges). |
 | `n` | Next | Advances to the next symbol of the scope's kind after the cursor. Requires `cursor` arg for LSP scopes. |
 | `p` | Previous | Moves to the previous symbol of the scope's kind before the cursor. Requires `cursor` arg for LSP scopes. |
+| `f` | First | The **first** occurrence of the component within the scope. |
+| `l` | Last | The **last** occurrence of the component within the scope. |
 
 ---
 
@@ -92,20 +95,22 @@ The component selects a sub-part of the scope.
 | `a` | Arguments | The parenthesized argument list at a **call site** of the named function (searched outside the function's own scope). | Function |
 | `n` | Name | The identifier (name) of the symbol. Uses the LSP `selectionRange` when available. For Line/Buffer scopes, returns a point at scope start. For Delimiter, returns the opening delimiter character. | all |
 | `s` | Self | The entire scope range. | all |
+| `w` | Word | A whitespace-delimited word. Text-based, no LSP required. | Line, Buffer |
+| `d` | Definition | The entire definition signature of a scope, excluding its body. For functions: visibility + keyword + name + parameters + return type. For variables: keyword + name + type annotation (excluding assignment). For structs/enums: visibility + keyword + name + generics. | Function, Variable, Struct |
 
 ### Scope-component validity matrix
 
 A chord with an invalid combination is rejected at parse time.
 
-|              | Beginning | Contents | End | Value | Parameters | Arguments | Name | Self |
-|--------------|:---------:|:--------:|:---:|:-----:|:----------:|:---------:|:----:|:----:|
-| **Line**       | Y         | --       | Y   | --    | --         | --        | Y    | Y    |
-| **Buffer**     | Y         | --       | Y   | --    | --         | --        | Y    | Y    |
-| **Function**   | --        | Y        | Y   | --    | Y          | Y         | Y    | Y    |
-| **Variable**   | --        | --       | Y   | Y     | --         | --        | Y    | Y    |
-| **Struct**     | --        | Y        | Y   | --    | --         | --        | Y    | Y    |
-| **Member**     | --        | --       | Y   | Y     | --         | --        | Y    | Y    |
-| **Delimiter**  | Y         | Y        | Y   | --    | --         | --        | Y    | Y    |
+|              | Beginning | Contents | End | Value | Parameters | Arguments | Name | Self | Word | Definition |
+|--------------|:---------:|:--------:|:---:|:-----:|:----------:|:---------:|:----:|:----:|:----:|:----------:|
+| **Line**       | Y         | --       | Y   | --    | --         | --        | Y    | Y    | Y    | --         |
+| **Buffer**     | Y         | --       | Y   | --    | --         | --        | Y    | Y    | Y    | --         |
+| **Function**   | --        | Y        | Y   | --    | Y          | Y         | Y    | Y    | --   | Y          |
+| **Variable**   | --        | --       | Y   | Y     | --         | --        | Y    | Y    | --   | Y          |
+| **Struct**     | --        | Y        | Y   | --    | --         | --        | Y    | Y    | --   | Y          |
+| **Member**     | --        | --       | Y   | Y     | --         | --        | Y    | Y    | --   | --         |
+| **Delimiter**  | Y         | Y        | Y   | --    | --         | --        | Y    | Y    | --   | --         |
 
 ---
 
@@ -154,6 +159,64 @@ cidc(cursor:"3,7", value:"x, y, z")
 # Find-replace within a scope
 rels(target:0, find:"foo", replace:"bar")
 ```
+
+---
+
+## List Action and Positional Filtering
+
+The `List` action has special behavior compared to modification actions. Instead of generating a diff, it collects all matching items matching the scope and component, then applies the positional as a **filter** on those results.
+
+### List in the TUI
+
+When you execute a List chord in the TUI, a scrollable overlay appears showing all matching items:
+
+```
+┌──────────────────────────┐
+│ List Results             │
+├──────────────────────────┤
+│ setup          (line 5)  │
+│ process        (line 12) │
+│ cleanup        (line 18) │
+└──────────────────────────┘
+```
+
+Use **Up/Down arrow keys** to navigate, then press **Enter** to jump the cursor to the selected item's position. Press **Escape** to close the dialog without navigating.
+
+### List in the CLI
+
+When you run a List chord via `ane exec`, each result is printed on a separate line with the format `line:col  name`:
+
+```
+$ ane exec file.rs lefn
+5:1  setup
+12:1  process
+18:1  cleanup
+```
+
+This is useful for scripting: pipe the output to other tools or parse it programmatically.
+
+### Positional filtering for List
+
+With List, the positional narrows the results:
+
+| Positional | Behavior |
+|:----------:|----------|
+| `Entire` (`e`) | Return all items (no filtering). |
+| `First` (`f`) | Return only the first item. |
+| `Last` (`l`) | Return only the last item. |
+| `Next` (`n`) | Return only the first item after the cursor. Requires `cursor` arg. |
+| `Previous` (`p`) | Return only the first item before the cursor. Requires `cursor` arg. |
+| `After` (`a`) | Return all items after the cursor. Requires `cursor` arg. |
+| `Before` (`b`) | Return all items before the cursor. Requires `cursor` arg. |
+| `Inside` (`i`) | Return only items within the innermost scope at the cursor. Requires `cursor` arg. |
+| `Until` (`u`) | Return items between start of scope and cursor. Requires `cursor` arg. |
+| `To` (`t`) | Return items between cursor and end of scope. Requires `cursor` arg. |
+
+For example:
+- `lefn` — list **all** function names in the buffer
+- `llfn` — list **last** function name in the buffer (single result)
+- `lafn` — list all function names **after** the cursor
+- `lisn` — list struct names **inside** the current scope
 
 ---
 

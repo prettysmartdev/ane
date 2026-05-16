@@ -178,6 +178,7 @@ The skill file teaches the agent ane's chord grammar in under 400 tokens, so it 
 - **[Chord Examples](02-chord-examples.md)** -- worked before/after examples for every combination
 - **[Using the TUI](03-using-the-tui.md)** -- modes, keybindings, file tree
 - **[Exec Mode](04-exec-mode.md)** -- headless one-shot edits for agents and scripts
+- **[Listing, Words, and Definitions](11-listing-and-word-definition.md)** -- explore code with List action, edit words, work with signatures
 - **[Embedding via Crate](05-embedding-via-crate.md)** -- using ane as a Rust library
 - **[LSP Integration](06-lsp-integration.md)** -- language server setup and status
 - **[Architecture Overview](07-architecture-overview.md)** -- three-layer design

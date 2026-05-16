@@ -7,6 +7,12 @@ use super::buffer::Buffer;
 use super::file_tree::{FileEntry, FileTree};
 use super::lsp::types::LspSharedState;
 
+#[derive(Debug, Clone)]
+pub struct ListDialogState {
+    pub items: Vec<(String, usize, usize)>, // (val, line, col)
+    pub selected: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Edit,
@@ -67,6 +73,7 @@ pub struct EditorState {
     pub tree_view: Vec<FileEntry>,
     pub lsp_state: Arc<Mutex<LspSharedState>>,
     pub selection: Option<Selection>,
+    pub list_dialog: Option<ListDialogState>,
 }
 
 impl EditorState {
@@ -101,6 +108,7 @@ impl EditorState {
             tree_view: Vec::new(),
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
+            list_dialog: None,
         })
     }
 
@@ -137,6 +145,7 @@ impl EditorState {
             tree_view,
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
+            list_dialog: None,
         })
     }
 

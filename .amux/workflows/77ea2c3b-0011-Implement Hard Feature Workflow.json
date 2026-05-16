@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "workflow_name": "Implement Hard Feature Workflow",
+  "workflow_hash": "fdd64ae78d2ac55898b6c4c262cb62490b2ec4ef4129b44516c8d7cd628c4aa8",
+  "work_item": 11,
+  "step_states": {
+    "docs": "Succeeded",
+    "review": "Pending",
+    "tests": "Succeeded",
+    "implement": "Succeeded"
+  },
+  "completed_steps": [
+    "docs",
+    "implement",
+    "tests"
+  ],
+  "current_step_index": null,
+  "started_at": "2026-05-16T19:27:38.659549Z",
+  "updated_at": "2026-05-16T20:49:46.066068Z"
+}

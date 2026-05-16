@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::data::buffer::Buffer;
+use crate::data::chord_types::Action;
 use crate::data::lsp::registry;
 use crate::data::lsp::types::ServerState;
 
@@ -39,12 +40,15 @@ fn args_are_empty(args: &ChordArgs) -> bool {
         && args.replace.is_none()
 }
 
+use super::chord_engine::types::ListItem;
+
 #[derive(Debug)]
 pub struct ChordResult {
     pub original: String,
     pub modified: String,
     pub warnings: Vec<String>,
     pub yanked: Option<String>,
+    pub listed_items: Vec<ListItem>,
 }
 
 pub fn execute_chord(
@@ -73,7 +77,7 @@ pub fn execute_chord(
     let mut chord = chord.clone();
     resolve_stdin_sentinels(&mut chord)?;
 
-    if args_are_empty(&chord.args) {
+    if args_are_empty(&chord.args) && chord.action != Action::List {
         bail!(
             "exec mode requires explicit parameters, e.g. {}(fn_name, \"body\")",
             chord.short_form()
@@ -127,6 +131,7 @@ pub fn execute_chord(
             modified,
             warnings: action.warnings.clone(),
             yanked: action.yanked_content.clone(),
+            listed_items: action.listed_items.clone(),
         })
     } else {
         Ok(ChordResult {
@@ -134,6 +139,7 @@ pub fn execute_chord(
             modified: original,
             warnings: Vec::new(),
             yanked: None,
+            listed_items: vec![],
         })
     }
 }

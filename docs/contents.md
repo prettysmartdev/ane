@@ -19,6 +19,7 @@ A guide to using ane, the chord-based terminal code editor for humans and agents
 | 08 | [Compared to Other Editors](08-compared-to-other-editors.md) | Trade-offs vs Vim, Neovim, Emacs, Helix, Kakoune, nano, micro |
 | 09 | [Syntax Highlighting and Languages](09-syntax-highlighting-and-languages.md) | Tree-sitter + LSP pipeline, supported languages, multi-language projects, per-language examples |
 | 10 | [Mouse Selection](10-mouse-selection.md) | Application-managed selection, click-to-position, drag-to-select, clipboard integration, native fallback |
+| 11 | [Listing, Words, and Definitions](11-listing-and-word-definition.md) | List action for exploration, Word component for text-level editing, Definition component for signatures, First/Last positionals |
 
 ---
 

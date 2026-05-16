@@ -28,6 +28,7 @@ use crate::data::state::{EditorState, Mode, Selection};
 use super::chord_box;
 use super::editor_pane;
 use super::exit_modal;
+use super::list_dialog;
 use super::status_bar;
 use super::title_bar;
 use super::tree_pane;
@@ -647,7 +648,24 @@ fn draw(
         chord_box::render(frame, layout.pane_area, state);
     }
 
-    if state.pending_open_path.is_some() {
+    if let Some(ref dialog_state) = state.list_dialog {
+        let dialog = list_dialog::ListDialog::new(
+            dialog_state
+                .items
+                .iter()
+                .map(
+                    |(val, line, col)| crate::commands::chord_engine::types::ListItem {
+                        val: val.clone(),
+                        line: *line,
+                        col: *col,
+                    },
+                )
+                .collect(),
+        );
+        let mut d = dialog;
+        d.selected = dialog_state.selected;
+        list_dialog::render(frame, &d);
+    } else if state.pending_open_path.is_some() {
         exit_modal::render_open_modal(frame);
     } else if state.show_exit_modal {
         exit_modal::render(frame, state);
@@ -665,6 +683,12 @@ fn handle_key(
     lsp_statuses: &[(Language, ServerState)],
     term_width: u16,
 ) -> bool {
+    // Priority 0: List dialog
+    if state.list_dialog.is_some() {
+        handle_list_dialog(state, code);
+        return false;
+    }
+
     // Priority 1: Exit modal
     if state.show_exit_modal {
         handle_exit_modal(state, code, modifiers);
@@ -729,6 +753,40 @@ fn handle_key(
 
     // Priority 6: Edit mode
     handle_edit_mode(state, code, modifiers, term_width)
+}
+
+fn handle_list_dialog(state: &mut EditorState, code: KeyCode) {
+    match code {
+        KeyCode::Up => {
+            if let Some(ref mut d) = state.list_dialog
+                && d.selected > 0
+            {
+                d.selected -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ref mut d) = state.list_dialog
+                && d.selected < d.items.len().saturating_sub(1)
+            {
+                d.selected += 1;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(ref d) = state.list_dialog
+                && let Some((_, line, col)) = d.items.get(d.selected)
+            {
+                state.cursor_line = *line;
+                state.cursor_col = *col;
+            }
+            state.list_dialog = None;
+            state.mode = Mode::Edit;
+            state.status_msg = "-- EDIT --".into();
+        }
+        KeyCode::Esc => {
+            state.list_dialog = None;
+        }
+        _ => {}
+    }
 }
 
 fn handle_exit_modal(state: &mut EditorState, code: KeyCode, modifiers: KeyModifiers) {
@@ -1780,6 +1838,43 @@ mod tests {
             "selection must be cleared after Ctrl-Y"
         );
         assert_eq!(state.status_msg, "copied 5 chars");
+    }
+
+    // --- work item 0011: List action ---
+
+    #[test]
+    fn handle_list_dialog_enter_navigates_to_selected_item() {
+        let (_f, mut state) = make_state_with_lines(&["aaa", "bbb", "ccc"]);
+        state.list_dialog = Some(crate::data::state::ListDialogState {
+            items: vec![
+                ("foo".to_string(), 0, 3),
+                ("bar".to_string(), 2, 1),
+            ],
+            selected: 1,
+        });
+        state.cursor_line = 0;
+        state.cursor_col = 0;
+        handle_list_dialog(&mut state, KeyCode::Enter);
+        assert!(state.list_dialog.is_none());
+        assert_eq!(state.cursor_line, 2);
+        assert_eq!(state.cursor_col, 1);
+        assert_eq!(state.mode, Mode::Edit);
+        assert_eq!(state.status_msg, "-- EDIT --");
+    }
+
+    #[test]
+    fn handle_list_dialog_escape_dismisses_dialog_without_moving_cursor() {
+        let (_f, mut state) = make_state_with_lines(&["aaa", "bbb", "ccc"]);
+        state.list_dialog = Some(crate::data::state::ListDialogState {
+            items: vec![("foo".to_string(), 2, 5)],
+            selected: 0,
+        });
+        state.cursor_line = 0;
+        state.cursor_col = 0;
+        handle_list_dialog(&mut state, KeyCode::Esc);
+        assert!(state.list_dialog.is_none());
+        assert_eq!(state.cursor_line, 0, "cursor must not move on Escape");
+        assert_eq!(state.cursor_col, 0, "cursor must not move on Escape");
     }
 
     #[test]

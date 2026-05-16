@@ -243,6 +243,7 @@ mod tests {
             tree_view,
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
+            list_dialog: None,
         }
     }
 

@@ -11,7 +11,7 @@ use crate::data::lsp::types::{DocumentSymbol, SymbolKind};
 use super::errors::ChordError;
 use super::text::{char_to_byte, extract_range_text, line_char_count};
 use super::types::{
-    BufferResolution, ChordQuery, CursorPosition, EditorMode, ResolvedChord, TextRange,
+    BufferResolution, ChordQuery, CursorPosition, EditorMode, ListItem, ResolvedChord, TextRange,
 };
 
 pub fn resolve(
@@ -38,6 +38,19 @@ fn resolve_buffer(
     buffer: &Buffer,
     lsp: &mut LspEngine,
 ) -> Result<BufferResolution> {
+    if query.action == Action::List {
+        let listed_items = resolve_list(query, buffer, lsp, buffer_name)?;
+        return Ok(BufferResolution {
+            target_ranges: vec![TextRange::point(0, 0)],
+            scope_range: TextRange::point(0, 0),
+            component_range: TextRange::point(0, 0),
+            replacement: None,
+            cursor_destination: None,
+            mode_after: None,
+            listed_items,
+        });
+    }
+
     let scope_range = resolve_scope(query, buffer_name, buffer, lsp)?;
     let component_range = resolve_component(query, buffer, &scope_range, buffer_name, lsp)?;
     let mut target_ranges =
@@ -65,6 +78,7 @@ fn resolve_buffer(
         replacement,
         cursor_destination,
         mode_after,
+        listed_items: vec![],
     })
 }
 
@@ -210,6 +224,33 @@ fn resolve_lsp_scope(
         .into());
     }
 
+    if matches!(query.positional, Positional::First | Positional::Last) {
+        let mut flat: Vec<&DocumentSymbol> = Vec::new();
+        flatten_by_kind(&symbols, target_kinds, &mut flat);
+        flat.sort_by(|a, b| {
+            a.range
+                .start_line
+                .cmp(&b.range.start_line)
+                .then(a.range.start_col.cmp(&b.range.start_col))
+        });
+        let sym = if query.positional == Positional::First {
+            flat.first()
+        } else {
+            flat.last()
+        };
+        if let Some(s) = sym {
+            return Ok(symbol_to_range(&s.range));
+        }
+        return Err(ChordError::resolve(
+            buffer_name,
+            format!(
+                "no {} found in buffer",
+                query.scope.to_string().to_lowercase()
+            ),
+        )
+        .into());
+    }
+
     if let Some((line, col)) = query.args.cursor_pos {
         if matches!(query.positional, Positional::Next | Positional::Previous) {
             if let Some(sym) =
@@ -318,6 +359,35 @@ fn resolve_member_scope(
         }
     }
 
+    if matches!(query.positional, Positional::First | Positional::Last) {
+        let (line, col) = query.args.cursor_pos.ok_or_else(|| {
+            ChordError::resolve(
+                buffer_name,
+                "First/Last member requires a cursor position to identify the parent struct",
+            )
+        })?;
+        if let Some(parent) = find_parent_struct_at_cursor(&symbols, line, col, parent_kinds) {
+            if parent.children.is_empty() {
+                return Err(ChordError::resolve(
+                    buffer_name,
+                    "no members found in enclosing struct/enum",
+                )
+                .into());
+            }
+            let member = if query.positional == Positional::First {
+                &parent.children[0]
+            } else {
+                &parent.children[parent.children.len() - 1]
+            };
+            return Ok(symbol_to_range(&member.range));
+        }
+        return Err(ChordError::resolve(
+            buffer_name,
+            "no enclosing struct/enum found at cursor position",
+        )
+        .into());
+    }
+
     if let Some((line, col)) = query.args.cursor_pos {
         if let Some(member) = find_member_at_cursor(&symbols, line, col, parent_kinds) {
             return Ok(symbol_to_range(&member.range));
@@ -345,7 +415,9 @@ fn resolve_variable_scope(
     let target_kinds = &[SymbolKind::Variable, SymbolKind::Const];
     let path = Path::new(buffer_name);
 
-    if query.args.target_name.is_some() {
+    if query.args.target_name.is_some()
+        || matches!(query.positional, Positional::First | Positional::Last)
+    {
         return resolve_lsp_scope(query, buffer_name, buffer, lsp, target_kinds);
     }
 
@@ -497,6 +569,10 @@ fn resolve_component(
         Component::Arguments => {
             resolve_arguments_component(query, buffer, scope_range, buffer_name)
         }
+        Component::Word => resolve_word_component(query, buffer, scope_range, buffer_name),
+        Component::Definition => {
+            resolve_definition_component(query, buffer, scope_range, buffer_name)
+        }
     }
 }
 
@@ -538,6 +614,23 @@ fn resolve_name_component(
         return Err(ChordError::resolve(
             buffer_name,
             format!("symbol '{name}' not found for Name component"),
+        )
+        .into());
+    }
+
+    if matches!(query.positional, Positional::First | Positional::Last) {
+        let target_kinds = scope_to_symbol_kinds(query.scope);
+        if !target_kinds.is_empty()
+            && let Some(sym) = find_symbol_in_range(&symbols, scope_range, &target_kinds)
+        {
+            return Ok(symbol_name_range(sym));
+        }
+        return Err(ChordError::resolve(
+            buffer_name,
+            format!(
+                "no {} found in scope range",
+                query.scope.to_string().to_lowercase()
+            ),
         )
         .into());
     }
@@ -822,10 +915,6 @@ fn apply_positional(
         }
         Positional::Outside => Ok(outside_ranges(scope_range, component_range)),
         Positional::Next | Positional::Previous => {
-            // For Line scope the component range was computed at the cursor's
-            // line; resolve_lsp_scope already moved the scope for LSP scopes.
-            // For now just return the component itself; resolve_lsp_scope
-            // already errors when no cursor was supplied for an LSP scope.
             if matches!(query.scope, Scope::Line) && query.args.cursor_pos.is_none() {
                 return Err(ChordError::resolve(
                     buffer_name,
@@ -842,6 +931,7 @@ fn apply_positional(
             }
             Ok(vec![*component_range])
         }
+        Positional::Last | Positional::First => Ok(vec![*component_range]),
     }
 }
 
@@ -937,7 +1027,7 @@ fn resolve_cursor_and_mode(
             };
             (Some(cursor), Some(EditorMode::Chord))
         }
-        Action::Yank => (None, None),
+        Action::Yank | Action::List => (None, None),
         Action::Jump => {
             let cursor = match query.positional {
                 Positional::To | Positional::Until | Positional::Before => CursorPosition {
@@ -1184,6 +1274,28 @@ fn find_member_at_cursor<'a>(
             }
         }
         if let Some(deeper) = find_member_at_cursor(&sym.children, line, col, parent_kinds) {
+            return Some(deeper);
+        }
+    }
+    None
+}
+
+fn find_parent_struct_at_cursor<'a>(
+    symbols: &'a [DocumentSymbol],
+    line: usize,
+    col: usize,
+    parent_kinds: &[SymbolKind],
+) -> Option<&'a DocumentSymbol> {
+    for sym in symbols {
+        if matches_kind(&sym.kind, parent_kinds) && contains_position(&sym.range, line, col) {
+            if let Some(deeper) =
+                find_parent_struct_at_cursor(&sym.children, line, col, parent_kinds)
+            {
+                return Some(deeper);
+            }
+            return Some(sym);
+        }
+        if let Some(deeper) = find_parent_struct_at_cursor(&sym.children, line, col, parent_kinds) {
             return Some(deeper);
         }
     }
@@ -1711,6 +1823,590 @@ fn shrink_range(buffer: &Buffer, range: &TextRange) -> TextRange {
         }
     }
     *range
+}
+
+fn resolve_word_component(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    scope_range: &TextRange,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    let cursor = query.args.cursor_pos.ok_or_else(|| {
+        ChordError::resolve(buffer_name, "Word component requires a cursor position")
+    })?;
+    let cursor_line = cursor.0;
+    let cursor_col = cursor.1;
+
+    let line_idx = if query.scope == Scope::Line {
+        query
+            .args
+            .target_line
+            .unwrap_or(cursor_line)
+            .min(buffer.line_count().saturating_sub(1))
+    } else {
+        cursor_line.min(buffer.line_count().saturating_sub(1))
+    };
+
+    let line = buffer.lines.get(line_idx).map(|l| l.as_str()).unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+
+    if chars.is_empty() || chars.iter().all(|c| c.is_whitespace()) {
+        return Err(ChordError::resolve(buffer_name, "no word found on current line").into());
+    }
+
+    let scope_start_col = if scope_range.start_line == line_idx {
+        scope_range.start_col
+    } else {
+        0
+    };
+    let scope_end_col = if scope_range.end_line == line_idx {
+        scope_range.end_col
+    } else {
+        chars.len()
+    };
+
+    let words = collect_words_in_range(&chars, scope_start_col, scope_end_col);
+
+    if words.is_empty() {
+        return Err(ChordError::resolve(buffer_name, "no word found on current line").into());
+    }
+
+    match query.positional {
+        Positional::First => {
+            let (start, end) = words[0];
+            Ok(TextRange {
+                start_line: line_idx,
+                start_col: start,
+                end_line: line_idx,
+                end_col: end,
+            })
+        }
+        Positional::Last => {
+            let (start, end) = words[words.len() - 1];
+            Ok(TextRange {
+                start_line: line_idx,
+                start_col: start,
+                end_line: line_idx,
+                end_col: end,
+            })
+        }
+        Positional::Next => {
+            let current_word_end = find_current_word_end(&words, cursor_col);
+            if let Some((start, end)) = words
+                .iter()
+                .find(|(s, _)| *s > current_word_end.unwrap_or(cursor_col))
+            {
+                Ok(TextRange {
+                    start_line: line_idx,
+                    start_col: *start,
+                    end_line: line_idx,
+                    end_col: *end,
+                })
+            } else {
+                Err(ChordError::resolve(buffer_name, "no next word on this line").into())
+            }
+        }
+        Positional::Previous => {
+            let current_word_start = find_current_word_start(&words, cursor_col);
+            if let Some((start, end)) = words
+                .iter()
+                .rev()
+                .find(|(_, e)| *e <= current_word_start.unwrap_or(cursor_col))
+            {
+                Ok(TextRange {
+                    start_line: line_idx,
+                    start_col: *start,
+                    end_line: line_idx,
+                    end_col: *end,
+                })
+            } else {
+                Err(ChordError::resolve(buffer_name, "no previous word on this line").into())
+            }
+        }
+        _ => {
+            // Entire, Inside, etc — find word at cursor
+            if let Some((start, end)) = find_word_at_cursor(&words, cursor_col) {
+                Ok(TextRange {
+                    start_line: line_idx,
+                    start_col: start,
+                    end_line: line_idx,
+                    end_col: end,
+                })
+            } else {
+                // cursor on whitespace — try next word then previous
+                if let Some((start, end)) = words.iter().find(|(s, _)| *s > cursor_col) {
+                    Ok(TextRange {
+                        start_line: line_idx,
+                        start_col: *start,
+                        end_line: line_idx,
+                        end_col: *end,
+                    })
+                } else if let Some((start, end)) =
+                    words.iter().rev().find(|(_, e)| *e <= cursor_col)
+                {
+                    Ok(TextRange {
+                        start_line: line_idx,
+                        start_col: *start,
+                        end_line: line_idx,
+                        end_col: *end,
+                    })
+                } else {
+                    Err(ChordError::resolve(buffer_name, "no word found at cursor position").into())
+                }
+            }
+        }
+    }
+}
+
+fn collect_words_in_range(chars: &[char], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut words = Vec::new();
+    let mut i = start;
+    while i < end {
+        if !chars[i].is_whitespace() {
+            let word_start = i;
+            while i < end && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            words.push((word_start, i));
+        } else {
+            i += 1;
+        }
+    }
+    words
+}
+
+fn find_word_at_cursor(words: &[(usize, usize)], col: usize) -> Option<(usize, usize)> {
+    words
+        .iter()
+        .find(|(start, end)| col >= *start && col < *end)
+        .copied()
+}
+
+fn find_current_word_end(words: &[(usize, usize)], col: usize) -> Option<usize> {
+    words
+        .iter()
+        .find(|(start, end)| col >= *start && col < *end)
+        .map(|(_, end)| *end)
+}
+
+fn find_current_word_start(words: &[(usize, usize)], col: usize) -> Option<usize> {
+    words
+        .iter()
+        .find(|(start, end)| col >= *start && col < *end)
+        .map(|(start, _)| *start)
+}
+
+fn resolve_definition_component(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    scope_range: &TextRange,
+    buffer_name: &str,
+) -> Result<TextRange> {
+    let text = extract_range_text(buffer, scope_range);
+
+    match query.scope {
+        Scope::Variable => {
+            // Definition is from start up to (but not including) `=` sign,
+            // or the full declaration minus semicolon if no assignment.
+            let chars: Vec<char> = text.chars().collect();
+            let eq_pos = find_standalone_equals(&chars);
+            let def_end_char = if let Some(pos) = eq_pos {
+                // Trim trailing whitespace before =
+                let mut end = pos;
+                while end > 0 && chars[end - 1].is_whitespace() {
+                    end -= 1;
+                }
+                end
+            } else {
+                // No assignment — trim trailing semicolon and whitespace
+                let mut end = chars.len();
+                while end > 0 && (chars[end - 1] == ';' || chars[end - 1].is_whitespace()) {
+                    end -= 1;
+                }
+                end
+            };
+            let def_range = char_offset_to_range(scope_range, &text, 0, def_end_char);
+            Ok(def_range)
+        }
+        Scope::Function => {
+            // Definition is from start to the opening `{`, or the full scope minus `;` if no body.
+            let chars: Vec<char> = text.chars().collect();
+            let brace_pos = find_first_open_brace(&chars);
+            let def_end_char = if let Some(pos) = brace_pos {
+                let mut end = pos;
+                while end > 0 && chars[end - 1].is_whitespace() {
+                    end -= 1;
+                }
+                end
+            } else {
+                // No body — trim trailing semicolon and whitespace
+                let mut end = chars.len();
+                while end > 0 && (chars[end - 1] == ';' || chars[end - 1].is_whitespace()) {
+                    end -= 1;
+                }
+                end
+            };
+            let def_range = char_offset_to_range(scope_range, &text, 0, def_end_char);
+            Ok(def_range)
+        }
+        Scope::Struct => {
+            // Definition is from start to the opening `{`, or up to `;`/`(` if unit/tuple struct.
+            let chars: Vec<char> = text.chars().collect();
+            let brace_pos = find_first_open_brace(&chars);
+            let paren_pos = find_first_open_paren(&chars);
+            let def_end_char = if let Some(pos) = brace_pos {
+                let mut end = pos;
+                while end > 0 && chars[end - 1].is_whitespace() {
+                    end -= 1;
+                }
+                end
+            } else if let Some(pos) = paren_pos {
+                // Tuple struct — definition is up to the `(`
+                let mut end = pos;
+                while end > 0 && chars[end - 1].is_whitespace() {
+                    end -= 1;
+                }
+                end
+            } else {
+                // Unit struct — trim trailing semicolon and whitespace
+                let mut end = chars.len();
+                while end > 0 && (chars[end - 1] == ';' || chars[end - 1].is_whitespace()) {
+                    end -= 1;
+                }
+                end
+            };
+            let def_range = char_offset_to_range(scope_range, &text, 0, def_end_char);
+            Ok(def_range)
+        }
+        _ => Err(ChordError::resolve(
+            buffer_name,
+            format!(
+                "Definition component is not valid for {} scope",
+                query.scope
+            ),
+        )
+        .into()),
+    }
+}
+
+fn find_standalone_equals(chars: &[char]) -> Option<usize> {
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '=' {
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let next = chars.get(i + 1).copied();
+            let is_compound = matches!(
+                prev,
+                Some('!' | '<' | '>' | '=' | '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^')
+            ) || next == Some('=')
+                || next == Some('>');
+            if !is_compound {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn find_first_open_brace(chars: &[char]) -> Option<usize> {
+    chars.iter().position(|&c| c == '{')
+}
+
+fn find_first_open_paren(chars: &[char]) -> Option<usize> {
+    chars.iter().position(|&c| c == '(')
+}
+
+fn char_offset_to_range(
+    scope_range: &TextRange,
+    text: &str,
+    start_char: usize,
+    end_char: usize,
+) -> TextRange {
+    let chars: Vec<char> = text.chars().collect();
+    let mut line = scope_range.start_line;
+    let mut col = scope_range.start_col;
+    let mut start_line = line;
+    let mut start_col = col;
+    let mut end_line = line;
+    let mut end_col = col;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if i == start_char {
+            start_line = line;
+            start_col = col;
+        }
+        if i == end_char {
+            end_line = line;
+            end_col = col;
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    if end_char >= chars.len() {
+        end_line = line;
+        end_col = col;
+    }
+
+    TextRange {
+        start_line,
+        start_col,
+        end_line,
+        end_col,
+    }
+}
+
+fn resolve_list(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+    buffer_name: &str,
+) -> Result<Vec<ListItem>> {
+    let mut items = collect_list_candidates(query, buffer, lsp, buffer_name)?;
+
+    if query.positional == Positional::Inside {
+        if let Some((cl, cc)) = query.args.cursor_pos
+            && let Ok(symbols) = lsp.document_symbols(Path::new(buffer_name))
+            && let Some(enclosing) = find_innermost_symbol(&symbols, cl, cc)
+        {
+            let range = &enclosing.range;
+            items.retain(|item| {
+                (item.line > range.start_line
+                    || (item.line == range.start_line && item.col >= range.start_col))
+                    && (item.line < range.end_line
+                        || (item.line == range.end_line && item.col <= range.end_col))
+            });
+        }
+        return Ok(items);
+    }
+
+    let cursor = query.args.cursor_pos;
+    items = filter_list_by_positional(items, query.positional, cursor);
+
+    Ok(items)
+}
+
+fn collect_list_candidates(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+    buffer_name: &str,
+) -> Result<Vec<ListItem>> {
+    match query.component {
+        Component::Word => collect_word_items(query, buffer, buffer_name),
+        Component::Name | Component::Definition | Component::End | Component::Self_ => {
+            collect_lsp_items(query, buffer, lsp, buffer_name)
+        }
+        _ => Err(ChordError::resolve(
+            buffer_name,
+            "List action only supports Name, Definition, End, and Self components for LSP scopes",
+        )
+        .into()),
+    }
+}
+
+fn collect_word_items(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    buffer_name: &str,
+) -> Result<Vec<ListItem>> {
+    let mut items = Vec::new();
+    match query.scope {
+        Scope::Buffer => {
+            for (line_idx, line) in buffer.lines.iter().enumerate() {
+                let chars: Vec<char> = line.chars().collect();
+                let words = collect_words_in_range(&chars, 0, chars.len());
+                for (start, end) in words {
+                    let val: String = chars[start..end].iter().collect();
+                    items.push(ListItem {
+                        val,
+                        line: line_idx,
+                        col: start,
+                    });
+                }
+            }
+        }
+        Scope::Line => {
+            let line_idx = query
+                .args
+                .target_line
+                .or(query.args.cursor_pos.map(|(l, _)| l))
+                .unwrap_or(0)
+                .min(buffer.line_count().saturating_sub(1));
+            let line = buffer.lines.get(line_idx).map(|l| l.as_str()).unwrap_or("");
+            let chars: Vec<char> = line.chars().collect();
+            let words = collect_words_in_range(&chars, 0, chars.len());
+            for (start, end) in words {
+                let val: String = chars[start..end].iter().collect();
+                items.push(ListItem {
+                    val,
+                    line: line_idx,
+                    col: start,
+                });
+            }
+        }
+        _ => {
+            return Err(ChordError::resolve(
+                buffer_name,
+                "Word component with List action only works with Line or Buffer scope",
+            )
+            .into());
+        }
+    }
+    Ok(items)
+}
+
+fn collect_lsp_items(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+    buffer_name: &str,
+) -> Result<Vec<ListItem>> {
+    let path = Path::new(buffer_name);
+    let symbols = lsp.document_symbols(path).map_err(|e| {
+        ChordError::resolve(
+            buffer_name,
+            format!("LSP not ready: {e}; LSP-scoped chords need an active language server"),
+        )
+    })?;
+
+    let target_kinds = scope_to_symbol_kinds(query.scope);
+    let mut flat: Vec<&DocumentSymbol> = Vec::new();
+    if target_kinds.is_empty() {
+        flatten_all_symbols(&symbols, &mut flat);
+    } else {
+        flatten_by_kind(&symbols, &target_kinds, &mut flat);
+    }
+
+    flat.sort_by(|a, b| {
+        a.range
+            .start_line
+            .cmp(&b.range.start_line)
+            .then(a.range.start_col.cmp(&b.range.start_col))
+    });
+
+    let mut items = Vec::new();
+    for sym in flat {
+        match query.component {
+            Component::Name => {
+                let name_range = symbol_name_range(sym);
+                items.push(ListItem {
+                    val: sym.name.clone(),
+                    line: name_range.start_line,
+                    col: name_range.start_col,
+                });
+            }
+            Component::Definition => {
+                let sym_range = symbol_to_range(&sym.range);
+                let scope_range = sym_range;
+                let mut def_query = query.clone();
+                def_query.scope = match sym.kind {
+                    SymbolKind::Function | SymbolKind::Method => Scope::Function,
+                    SymbolKind::Struct | SymbolKind::Enum => Scope::Struct,
+                    SymbolKind::Variable | SymbolKind::Const => Scope::Variable,
+                    _ => Scope::Function,
+                };
+                if let Ok(def_range) =
+                    resolve_definition_component(&def_query, buffer, &scope_range, buffer_name)
+                {
+                    let val = extract_range_text(buffer, &def_range);
+                    items.push(ListItem {
+                        val,
+                        line: def_range.start_line,
+                        col: def_range.start_col,
+                    });
+                }
+            }
+            Component::End => {
+                let sym_range = symbol_to_range(&sym.range);
+                items.push(ListItem {
+                    val: sym.name.clone(),
+                    line: sym_range.end_line,
+                    col: sym_range.end_col,
+                });
+            }
+            Component::Self_ => {
+                let sym_range = symbol_to_range(&sym.range);
+                let val = extract_range_text(buffer, &sym_range);
+                items.push(ListItem {
+                    val,
+                    line: sym_range.start_line,
+                    col: sym_range.start_col,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+fn flatten_all_symbols<'a>(symbols: &'a [DocumentSymbol], out: &mut Vec<&'a DocumentSymbol>) {
+    for sym in symbols {
+        out.push(sym);
+        flatten_all_symbols(&sym.children, out);
+    }
+}
+
+fn filter_list_by_positional(
+    items: Vec<ListItem>,
+    positional: Positional,
+    cursor: Option<(usize, usize)>,
+) -> Vec<ListItem> {
+    match positional {
+        Positional::Entire => items,
+        Positional::After => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .filter(|item| item.line > cl || (item.line == cl && item.col > cc))
+                .collect()
+        }
+        Positional::Before => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .filter(|item| item.line < cl || (item.line == cl && item.col < cc))
+                .collect()
+        }
+        Positional::Next => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .find(|item| item.line > cl || (item.line == cl && item.col > cc))
+                .into_iter()
+                .collect()
+        }
+        Positional::Previous => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .rev()
+                .find(|item| item.line < cl || (item.line == cl && item.col < cc))
+                .into_iter()
+                .collect()
+        }
+        Positional::Last => items.into_iter().last().into_iter().collect(),
+        Positional::First => items.into_iter().next().into_iter().collect(),
+        Positional::Inside => items,
+        Positional::Until => {
+            let (cl, cc) = cursor.unwrap_or((usize::MAX, usize::MAX));
+            items
+                .into_iter()
+                .filter(|item| item.line < cl || (item.line == cl && item.col <= cc))
+                .collect()
+        }
+        Positional::To => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .filter(|item| item.line > cl || (item.line == cl && item.col >= cc))
+                .collect()
+        }
+        Positional::Outside => items, // should not happen due to validation
+    }
 }
 
 #[cfg(test)]
@@ -4173,5 +4869,724 @@ mod tests {
             Some(CursorPosition { line: 0, col: 3 })
         );
         assert_eq!(res.mode_after, Some(EditorMode::Chord));
+    }
+
+    // --- work item 0011: Word / Definition / List ---
+
+    // resolve_word_component
+
+    #[test]
+    fn resolve_word_component_entire_cursor_on_word() {
+        // "   hello world" — col 3 is 'h'; "hello" spans [3, 8)
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 3)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 3);
+        assert_eq!(range.end_line, 0);
+        assert_eq!(range.end_col, 8);
+    }
+
+    #[test]
+    fn resolve_word_component_entire_cursor_on_whitespace_picks_next() {
+        // cursor at col 8 (the space between "hello" and "world") → next word = "world" [9, 14)
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 8)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 9);
+        assert_eq!(range.end_col, 14);
+    }
+
+    #[test]
+    fn resolve_word_component_next() {
+        // cursor on "hello" (col 3) → next word = "world" [9, 14)
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Jump,
+            Positional::Next,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 3)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 9);
+        assert_eq!(range.end_col, 14);
+    }
+
+    #[test]
+    fn resolve_word_component_previous() {
+        // cursor on "world" (col 9) → previous word = "hello" [3, 8)
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Jump,
+            Positional::Previous,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 9)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 3);
+        assert_eq!(range.end_col, 8);
+    }
+
+    #[test]
+    fn resolve_word_component_first() {
+        // First always returns the first word regardless of cursor position
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Jump,
+            Positional::First,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 9)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 3);
+        assert_eq!(range.end_col, 8);
+    }
+
+    #[test]
+    fn resolve_word_component_last() {
+        // Last always returns the last word regardless of cursor position
+        let buffer = buf(&["   hello world"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Jump,
+            Positional::Last,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 3)),
+        );
+        let range = resolve_word_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 9);
+        assert_eq!(range.end_col, 14);
+    }
+
+    #[test]
+    fn resolve_word_component_empty_line_errors() {
+        let buffer = buf(&[""]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let result = resolve_word_component(&q, &buffer, &scope, "/buf");
+        assert!(result.is_err(), "empty line should error");
+    }
+
+    // resolve_definition_component
+
+    #[test]
+    fn resolve_definition_component_function_with_body() {
+        // "pub fn foo(x: i32) -> bool {" — definition ends before the space+'{' at col 26
+        let buffer = buf(&["pub fn foo(x: i32) -> bool {", "    true", "}"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 2,
+            end_col: 1,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 0);
+        // "pub fn foo(x: i32) -> bool" = 26 chars → end_col 26 (exclusive)
+        assert_eq!(range.end_col, 26);
+    }
+
+    #[test]
+    fn resolve_definition_component_variable_with_type_and_assignment() {
+        // "let count: i32 = 0;" → definition = "let count: i32" (14 chars)
+        let buffer = buf(&["let count: i32 = 0;"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 19,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 0);
+        assert_eq!(range.end_col, 14);
+    }
+
+    #[test]
+    fn resolve_definition_component_variable_without_assignment() {
+        // "let count: i32;" → no '=', trim ';' → "let count: i32" (14 chars)
+        let buffer = buf(&["let count: i32;"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 15,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_col, 14);
+    }
+
+    #[test]
+    fn resolve_definition_component_variable_without_type() {
+        // "let count = 0;" → trim before '=' → "let count" (9 chars, end_col 9)
+        let buffer = buf(&["let count = 0;"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 14,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Variable,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_col, 9);
+    }
+
+    #[test]
+    fn resolve_definition_component_struct() {
+        // "pub struct Config<T> {" → definition = "pub struct Config<T>" (20 chars)
+        let buffer = buf(&["pub struct Config<T> {", "    field: T,", "}"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 2,
+            end_col: 1,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Struct,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 0);
+        assert_eq!(range.end_col, 20);
+    }
+
+    #[test]
+    fn resolve_definition_component_enum_with_struct_scope() {
+        // "enum Status {" → Struct scope (enum uses Struct) → definition = "enum Status" (11 chars)
+        let buffer = buf(&["enum Status {", "    Active,", "}"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 2,
+            end_col: 1,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Struct,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 0);
+        assert_eq!(range.end_col, 11);
+    }
+
+    #[test]
+    fn resolve_definition_component_trait_method_no_body() {
+        // "fn process(&self) -> Result<()>;" → no '{', trim ';' → "fn process(&self) -> Result<()>"
+        let buffer = buf(&["fn process(&self) -> Result<()>;"]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 32,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 0);
+        assert_eq!(range.end_col, 31);
+    }
+
+    #[test]
+    fn resolve_definition_component_multiline_signature() {
+        // Multi-line params: definition ends on line 3 before the '{'
+        let buffer = buf(&[
+            "pub fn foo(",
+            "    x: i32,",
+            "    y: i32,",
+            ") -> bool {",
+            "    true",
+            "}",
+        ]);
+        let scope = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 5,
+            end_col: 1,
+        };
+        let q = query(
+            Action::Change,
+            Positional::Entire,
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let range = resolve_definition_component(&q, &buffer, &scope, "/buf").unwrap();
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        // Definition spans to line 3 ") -> bool {", stopping before ' {'
+        assert_eq!(range.end_line, 3);
+        // ") -> bool" = 9 chars on line 3 (0-indexed end col 9)
+        assert_eq!(range.end_col, 9);
+    }
+
+    // resolve_list
+
+    #[test]
+    fn resolve_list_definition_component_returns_signatures() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "pub fn foo(x: i32) -> bool {",
+                "    true",
+                "}",
+                "fn bar() {",
+                "    false",
+                "}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("foo", SymbolKind::Function, 0, 0, 2, 1),
+                sym("bar", SymbolKind::Function, 3, 0, 5, 1),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Entire,
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 2);
+        assert!(
+            res.listed_items[0].val.starts_with("pub fn foo"),
+            "first item val: {}",
+            res.listed_items[0].val
+        );
+        assert!(
+            res.listed_items[1].val.starts_with("fn bar"),
+            "second item val: {}",
+            res.listed_items[1].val
+        );
+    }
+
+    #[test]
+    fn resolve_list_entire_returns_all_functions_in_source_order() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("alpha", SymbolKind::Function, 0, 0, 0, 13),
+                sym("beta", SymbolKind::Function, 1, 0, 1, 12),
+                sym("gamma", SymbolKind::Function, 2, 0, 2, 13),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Entire,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 3);
+        assert_eq!(res.listed_items[0].val, "alpha");
+        assert_eq!(res.listed_items[1].val, "beta");
+        assert_eq!(res.listed_items[2].val, "gamma");
+        // Verify source order by line
+        assert!(res.listed_items[0].line < res.listed_items[1].line);
+        assert!(res.listed_items[1].line < res.listed_items[2].line);
+    }
+
+    #[test]
+    fn resolve_list_after_filter_returns_only_items_after_cursor() {
+        // Functions on lines 2, 5, 8; cursor at (5, 5) → After returns only line 8
+        let path = "/test/file.rs";
+        let lines: Vec<&str> = vec![
+            "// line 0",
+            "// line 1",
+            "fn alpha() {}",
+            "// line 3",
+            "// line 4",
+            "fn beta() {}",
+            "// line 6",
+            "// line 7",
+            "fn gamma() {}",
+        ];
+        let buffer = named_buf(path, &lines);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("alpha", SymbolKind::Function, 2, 0, 2, 13),
+                sym("beta", SymbolKind::Function, 5, 0, 5, 12),
+                sym("gamma", SymbolKind::Function, 8, 0, 8, 13),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::After,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            Some((5, 5)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 1);
+        assert_eq!(res.listed_items[0].val, "gamma");
+        assert_eq!(res.listed_items[0].line, 8);
+    }
+
+    #[test]
+    fn resolve_list_before_filter_returns_items_before_cursor() {
+        // Same buffer; cursor at (5, 5) → Before returns alpha (line 2) and beta (line 5, col 0 < 5)
+        let path = "/test/file.rs";
+        let lines: Vec<&str> = vec![
+            "// line 0",
+            "// line 1",
+            "fn alpha() {}",
+            "// line 3",
+            "// line 4",
+            "fn beta() {}",
+            "// line 6",
+            "// line 7",
+            "fn gamma() {}",
+        ];
+        let buffer = named_buf(path, &lines);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("alpha", SymbolKind::Function, 2, 0, 2, 13),
+                sym("beta", SymbolKind::Function, 5, 0, 5, 12),
+                sym("gamma", SymbolKind::Function, 8, 0, 8, 13),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Before,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            Some((5, 5)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 2);
+        assert_eq!(res.listed_items[0].val, "alpha");
+        assert_eq!(res.listed_items[1].val, "beta");
+    }
+
+    #[test]
+    fn resolve_list_last_filter_returns_only_last_item() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("alpha", SymbolKind::Function, 0, 0, 0, 13),
+                sym("beta", SymbolKind::Function, 1, 0, 1, 12),
+                sym("gamma", SymbolKind::Function, 2, 0, 2, 13),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Last,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 1);
+        assert_eq!(res.listed_items[0].val, "gamma");
+    }
+
+    #[test]
+    fn resolve_list_first_filter_returns_only_first_item() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn alpha() {}", "fn beta() {}", "fn gamma() {}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("alpha", SymbolKind::Function, 0, 0, 0, 13),
+                sym("beta", SymbolKind::Function, 1, 0, 1, 12),
+                sym("gamma", SymbolKind::Function, 2, 0, 2, 13),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::First,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 1);
+        assert_eq!(res.listed_items[0].val, "alpha");
+    }
+
+    #[test]
+    fn resolve_list_empty_results_when_no_functions() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["let x = 1;", "let y = 2;"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![]);
+
+        let q = query(
+            Action::List,
+            Positional::Entire,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(res.listed_items.is_empty());
+    }
+
+    // Positional::Last and First in standard (non-List) resolution
+
+    #[test]
+    fn jump_last_function_name_resolves_to_last_function() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {}", "fn bar() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        // selection_range gives the name position for each function
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym_sel("foo", SymbolKind::Function, 0, 0, 0, 11, 0, 3, 0, 6),
+                sym_sel("bar", SymbolKind::Function, 1, 0, 1, 11, 1, 3, 1, 6),
+            ],
+        );
+
+        let q = query(
+            Action::Jump,
+            Positional::Last,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // Last function is "bar" whose name starts at (1, 3)
+        assert_eq!(
+            res.cursor_destination,
+            Some(CursorPosition { line: 1, col: 3 })
+        );
+    }
+
+    #[test]
+    fn jump_first_function_name_resolves_to_first_function() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {}", "fn bar() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym_sel("foo", SymbolKind::Function, 0, 0, 0, 11, 0, 3, 0, 6),
+                sym_sel("bar", SymbolKind::Function, 1, 0, 1, 11, 1, 3, 1, 6),
+            ],
+        );
+
+        let q = query(
+            Action::Jump,
+            Positional::First,
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        // First function is "foo" whose name starts at (0, 3)
+        assert_eq!(
+            res.cursor_destination,
+            Some(CursorPosition { line: 0, col: 3 })
+        );
     }
 }

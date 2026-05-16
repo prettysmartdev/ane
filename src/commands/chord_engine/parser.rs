@@ -2,6 +2,7 @@ use anyhow::Result;
 
 use crate::data::chord_types::{
     Action, Component, Positional, Scope, is_valid_combination, is_valid_jump_combination,
+    is_valid_list_positional,
 };
 
 use super::errors::ChordError;
@@ -187,12 +188,53 @@ fn try_parse_short_form(
         return Err(ChordError::parse(_original_input, 0, msg).into());
     }
 
+    if action == Action::List && !is_valid_list_positional(positional) {
+        return Err(ChordError::parse(
+            _original_input,
+            0,
+            "List action does not support the Outside positional",
+        )
+        .into());
+    }
+
     let args = parse_args(raw_args);
 
     if action == Action::Jump && args.value.is_some() {
         return Err(
             ChordError::parse(_original_input, 0, "Jump does not accept a value argument").into(),
         );
+    }
+
+    if action == Action::List {
+        if args.value.is_some() {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action does not accept a value argument",
+            )
+            .into());
+        }
+        if args.find.is_some() || args.replace.is_some() {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action does not accept find/replace arguments",
+            )
+            .into());
+        }
+        if scope.requires_lsp()
+            && !matches!(
+                component,
+                Component::Name | Component::Definition | Component::End | Component::Self_
+            )
+        {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action only supports Name, Definition, End, and Self components for LSP scopes",
+            )
+            .into());
+        }
     }
 
     Ok(Some(ChordQuery {
@@ -251,12 +293,53 @@ fn try_parse_long_form(
         return Err(ChordError::parse(_original_input, 0, msg).into());
     }
 
+    if action == Action::List && !is_valid_list_positional(positional) {
+        return Err(ChordError::parse(
+            _original_input,
+            0,
+            "List action does not support the Outside positional",
+        )
+        .into());
+    }
+
     let args = parse_args(raw_args);
 
     if action == Action::Jump && args.value.is_some() {
         return Err(
             ChordError::parse(_original_input, 0, "Jump does not accept a value argument").into(),
         );
+    }
+
+    if action == Action::List {
+        if args.value.is_some() {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action does not accept a value argument",
+            )
+            .into());
+        }
+        if args.find.is_some() || args.replace.is_some() {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action does not accept find/replace arguments",
+            )
+            .into());
+        }
+        if scope.requires_lsp()
+            && !matches!(
+                component,
+                Component::Name | Component::Definition | Component::End | Component::Self_
+            )
+        {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "List action only supports Name, Definition, End, and Self components for LSP scopes",
+            )
+            .into());
+        }
     }
 
     Ok(Some(ChordQuery {
@@ -279,6 +362,7 @@ fn parse_long_action(input: &str) -> Option<(Action, &str)> {
         ("Prepend", Action::Prepend),
         ("Insert", Action::Insert),
         ("Jump", Action::Jump),
+        ("List", Action::List),
     ];
     for (prefix, action) in pairs {
         if let Some(rest) = input.strip_prefix(prefix) {
@@ -298,6 +382,8 @@ fn parse_long_positional(input: &str) -> Option<(Positional, &str)> {
         ("Previous", Positional::Previous),
         ("Entire", Positional::Entire),
         ("Outside", Positional::Outside),
+        ("First", Positional::First),
+        ("Last", Positional::Last),
         ("To", Positional::To),
     ];
     for (prefix, positional) in pairs {
@@ -336,6 +422,8 @@ fn parse_long_component(input: &str) -> Option<Component> {
         "Arguments" => Some(Component::Arguments),
         "Name" => Some(Component::Name),
         "Self" => Some(Component::Self_),
+        "Word" => Some(Component::Word),
+        "Definition" => Some(Component::Definition),
         _ => None,
     }
 }
@@ -346,10 +434,10 @@ fn suggest_chord(input: &str) -> Option<String> {
         return None;
     }
 
-    let actions = ['c', 'r', 'd', 'y', 'a', 'p', 'i', 'j'];
-    let positionals = ['i', 'u', 'a', 'b', 'n', 'p', 'e', 'o', 't'];
+    let actions = ['c', 'r', 'd', 'y', 'a', 'p', 'i', 'j', 'l'];
+    let positionals = ['i', 'u', 'a', 'b', 'n', 'p', 'e', 'o', 't', 'l', 'f'];
     let scopes = ['l', 'b', 'f', 'v', 's', 'm', 'd'];
-    let components = ['b', 'c', 'e', 'v', 'p', 'a', 'n', 's'];
+    let components = ['b', 'c', 'e', 'v', 'p', 'a', 'n', 's', 'w', 'd'];
 
     let mut best_dist = usize::MAX;
     let mut best = None;
@@ -916,5 +1004,164 @@ mod tests {
         // cpds = Change Previous Delimiter Self_
         let result = parse("cpds");
         assert!(result.is_err());
+    }
+
+    // --- work item 0011: Word / Definition / List ---
+
+    #[test]
+    fn parse_lefn_list_entire_function_name() {
+        let q = parse("lefn").unwrap();
+        assert_eq!(q.action, Action::List);
+        assert_eq!(q.positional, Positional::Entire);
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Name);
+    }
+
+    #[test]
+    fn parse_lisn_list_inside_struct_name() {
+        let q = parse("lisn").unwrap();
+        assert_eq!(q.action, Action::List);
+        assert_eq!(q.positional, Positional::Inside);
+        assert_eq!(q.scope, Scope::Struct);
+        assert_eq!(q.component, Component::Name);
+    }
+
+    #[test]
+    fn parse_lafn_list_after_function_name() {
+        let q = parse("lafn").unwrap();
+        assert_eq!(q.action, Action::List);
+        assert_eq!(q.positional, Positional::After);
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Name);
+    }
+
+    #[test]
+    fn parse_celw_change_entire_line_word() {
+        let q = parse("celw").unwrap();
+        assert_eq!(q.action, Action::Change);
+        assert_eq!(q.positional, Positional::Entire);
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Word);
+    }
+
+    #[test]
+    fn parse_jnlw_jump_next_line_word() {
+        let q = parse("jnlw").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::Next);
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Word);
+    }
+
+    #[test]
+    fn parse_jllw_jump_last_line_word() {
+        let q = parse("jllw").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::Last);
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Word);
+    }
+
+    #[test]
+    fn parse_jflw_jump_first_line_word() {
+        let q = parse("jflw").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::First);
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Word);
+    }
+
+    #[test]
+    fn parse_jlfn_jump_last_function_name() {
+        let q = parse("jlfn").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::Last);
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Name);
+    }
+
+    #[test]
+    fn parse_lefd_list_entire_function_definition() {
+        let q = parse("lefd").unwrap();
+        assert_eq!(q.action, Action::List);
+        assert_eq!(q.positional, Positional::Entire);
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Definition);
+    }
+
+    #[test]
+    fn parse_cefd_change_entire_function_definition() {
+        let q = parse("cefd").unwrap();
+        assert_eq!(q.action, Action::Change);
+        assert_eq!(q.positional, Positional::Entire);
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Definition);
+    }
+
+    #[test]
+    fn parse_yevd_yank_entire_variable_definition() {
+        let q = parse("yevd").unwrap();
+        assert_eq!(q.action, Action::Yank);
+        assert_eq!(q.positional, Positional::Entire);
+        assert_eq!(q.scope, Scope::Variable);
+        assert_eq!(q.component, Component::Definition);
+    }
+
+    #[test]
+    fn parse_celd_invalid_line_definition_combo() {
+        let result = parse("celd");
+        assert!(result.is_err(), "celd should fail: Line+Definition is invalid");
+    }
+
+    #[test]
+    fn parse_list_with_value_arg_errors() {
+        let result = parse(r#"lefn(value:"x")"#);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("List action does not accept a value argument"),
+            "expected value-arg error: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_list_outside_positional_errors() {
+        let result = parse("lofn");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("List action does not support the Outside positional"),
+            "expected outside-positional error: {msg}"
+        );
+    }
+
+    #[test]
+    fn long_form_list_entire_function_name_matches_short() {
+        let short = parse("lefn").unwrap();
+        let long = parse("ListEntireFunctionName").unwrap();
+        assert_eq!(short.action, long.action);
+        assert_eq!(short.positional, long.positional);
+        assert_eq!(short.scope, long.scope);
+        assert_eq!(short.component, long.component);
+    }
+
+    #[test]
+    fn long_form_list_entire_function_definition_matches_short() {
+        let short = parse("lefd").unwrap();
+        let long = parse("ListEntireFunctionDefinition").unwrap();
+        assert_eq!(short.action, long.action);
+        assert_eq!(short.positional, long.positional);
+        assert_eq!(short.scope, long.scope);
+        assert_eq!(short.component, long.component);
+    }
+
+    #[test]
+    fn long_form_jump_last_line_word_matches_short() {
+        let short = parse("jllw").unwrap();
+        let long = parse("JumpLastLineWord").unwrap();
+        assert_eq!(short.action, long.action);
+        assert_eq!(short.positional, long.positional);
+        assert_eq!(short.scope, long.scope);
+        assert_eq!(short.component, long.component);
     }
 }

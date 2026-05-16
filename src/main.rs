@@ -55,7 +55,11 @@ fn run_exec(chord_str: &str, path: &std::path::Path) -> Result<()> {
         eprintln!("warning: {w}");
     }
 
-    if let Some(ref yanked) = result.yanked {
+    if !result.listed_items.is_empty() {
+        for item in &result.listed_items {
+            println!("{}:{}  {}", item.line + 1, item.col + 1, item.val);
+        }
+    } else if let Some(ref yanked) = result.yanked {
         println!("{yanked}");
     } else {
         let path_str = path.display().to_string();

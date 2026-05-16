@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
+use anyhow::Result;
+
 use crate::data::chord_types::{Action, Component, Positional, Scope};
+use crate::data::state::EditorState;
 
 #[derive(Debug, Clone)]
 pub struct ChordQuery {
@@ -56,6 +59,7 @@ pub struct BufferResolution {
     pub replacement: Option<String>,
     pub cursor_destination: Option<CursorPosition>,
     pub mode_after: Option<EditorMode>,
+    pub listed_items: Vec<ListItem>,
 }
 
 impl BufferResolution {
@@ -102,6 +106,17 @@ pub enum EditorMode {
     Chord,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    pub val: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+pub trait ListFrontend {
+    fn show_list(&mut self, state: &mut EditorState, items: &[ListItem]) -> Result<()>;
+}
+
 #[derive(Debug, Clone)]
 pub struct ChordAction {
     pub buffer_name: String,
@@ -111,6 +126,7 @@ pub struct ChordAction {
     pub mode_after: Option<EditorMode>,
     pub highlight_ranges: Vec<TextRange>,
     pub warnings: Vec<String>,
+    pub listed_items: Vec<ListItem>,
 }
 
 #[derive(Debug, Clone)]

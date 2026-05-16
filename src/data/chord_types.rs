@@ -10,6 +10,7 @@ pub enum Action {
     Prepend,
     Insert,
     Jump,
+    List,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +24,8 @@ pub enum Positional {
     Entire,
     Outside,
     To,
+    Last,
+    First,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +49,8 @@ pub enum Component {
     Arguments,
     Name,
     Self_,
+    Word,
+    Definition,
 }
 
 impl Action {
@@ -59,6 +64,7 @@ impl Action {
             Self::Prepend => "p",
             Self::Insert => "i",
             Self::Jump => "j",
+            Self::List => "l",
         }
     }
 
@@ -72,6 +78,7 @@ impl Action {
             "p" => Some(Self::Prepend),
             "i" => Some(Self::Insert),
             "j" => Some(Self::Jump),
+            "l" => Some(Self::List),
             _ => None,
         }
     }
@@ -93,6 +100,8 @@ impl Positional {
             Self::Entire => "e",
             Self::Outside => "o",
             Self::To => "t",
+            Self::Last => "l",
+            Self::First => "f",
         }
     }
 
@@ -107,6 +116,8 @@ impl Positional {
             "e" => Some(Self::Entire),
             "o" => Some(Self::Outside),
             "t" => Some(Self::To),
+            "l" => Some(Self::Last),
+            "f" => Some(Self::First),
             _ => None,
         }
     }
@@ -154,6 +165,8 @@ impl Component {
             Self::Arguments => "a",
             Self::Name => "n",
             Self::Self_ => "s",
+            Self::Word => "w",
+            Self::Definition => "d",
         }
     }
 
@@ -167,6 +180,8 @@ impl Component {
             "a" => Some(Self::Arguments),
             "n" => Some(Self::Name),
             "s" => Some(Self::Self_),
+            "w" => Some(Self::Word),
+            "d" => Some(Self::Definition),
             _ => None,
         }
     }
@@ -174,6 +189,10 @@ impl Component {
 
 pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     match (scope, component) {
+        (Scope::Line | Scope::Buffer, Component::Word) => true,
+        (_, Component::Word) => false,
+        (Scope::Function | Scope::Variable | Scope::Struct, Component::Definition) => true,
+        (_, Component::Definition) => false,
         (Scope::Delimiter, Component::Beginning) => true,
         (Scope::Delimiter, Component::Contents) => true,
         (Scope::Delimiter, Component::End) => true,
@@ -197,6 +216,10 @@ pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     }
 }
 
+pub fn is_valid_list_positional(positional: Positional) -> bool {
+    !matches!(positional, Positional::Outside)
+}
+
 pub fn is_valid_jump_combination(positional: Positional, component: Component) -> bool {
     match positional {
         Positional::Outside => matches!(component, Component::Beginning | Component::End),
@@ -218,6 +241,7 @@ impl fmt::Display for Action {
             Self::Prepend => write!(f, "Prepend"),
             Self::Insert => write!(f, "Insert"),
             Self::Jump => write!(f, "Jump"),
+            Self::List => write!(f, "List"),
         }
     }
 }
@@ -234,6 +258,8 @@ impl fmt::Display for Positional {
             Self::Entire => write!(f, "Entire"),
             Self::Outside => write!(f, "Outside"),
             Self::To => write!(f, "To"),
+            Self::Last => write!(f, "Last"),
+            Self::First => write!(f, "First"),
         }
     }
 }
@@ -263,6 +289,8 @@ impl fmt::Display for Component {
             Self::Arguments => write!(f, "Arguments"),
             Self::Name => write!(f, "Name"),
             Self::Self_ => write!(f, "Self"),
+            Self::Word => write!(f, "Word"),
+            Self::Definition => write!(f, "Definition"),
         }
     }
 }
@@ -282,6 +310,7 @@ mod tests {
             Action::Prepend,
             Action::Insert,
             Action::Jump,
+            Action::List,
         ] {
             let short = action.short();
             assert_eq!(Action::from_short(short), Some(action));
@@ -300,6 +329,8 @@ mod tests {
             Positional::Entire,
             Positional::Outside,
             Positional::To,
+            Positional::Last,
+            Positional::First,
         ] {
             let short = positional.short();
             assert_eq!(Positional::from_short(short), Some(positional));
@@ -333,6 +364,8 @@ mod tests {
             Component::Arguments,
             Component::Name,
             Component::Self_,
+            Component::Word,
+            Component::Definition,
         ] {
             let short = component.short();
             assert_eq!(Component::from_short(short), Some(component));
@@ -382,10 +415,10 @@ mod tests {
 
     #[test]
     fn each_position_has_unique_short_letters() {
-        let actions = ["c", "r", "d", "y", "a", "p", "i", "j"];
-        let positionals = ["i", "u", "a", "b", "n", "p", "e", "o", "t"];
+        let actions = ["c", "r", "d", "y", "a", "p", "i", "j", "l"];
+        let positionals = ["i", "u", "a", "b", "n", "p", "e", "o", "t", "l", "f"];
         let scopes = ["l", "b", "f", "v", "s", "m", "d"];
-        let components = ["b", "c", "e", "v", "p", "a", "n", "s"];
+        let components = ["b", "c", "e", "v", "p", "a", "n", "s", "w", "d"];
         for set in [&actions[..], &positionals[..], &scopes[..], &components[..]] {
             let mut seen = std::collections::HashSet::new();
             for s in set {
@@ -414,6 +447,8 @@ mod tests {
             Component::Arguments,
             Component::Name,
             Component::Self_,
+            Component::Word,
+            Component::Definition,
         ];
         for s in &scopes {
             for c in &components {
@@ -513,6 +548,8 @@ mod tests {
             Positional::Previous,
             Positional::Entire,
             Positional::To,
+            Positional::Last,
+            Positional::First,
         ] {
             assert!(
                 !is_valid_jump_combination(pos, Component::Value),
@@ -549,5 +586,68 @@ mod tests {
             Scope::Delimiter,
             Component::Arguments
         ));
+    }
+
+    // --- work item 0011: Word / Definition / List ---
+
+    #[test]
+    fn word_component_valid_combinations() {
+        assert!(is_valid_combination(Scope::Line, Component::Word));
+        assert!(is_valid_combination(Scope::Buffer, Component::Word));
+    }
+
+    #[test]
+    fn word_component_invalid_combinations() {
+        assert!(!is_valid_combination(Scope::Function, Component::Word));
+        assert!(!is_valid_combination(Scope::Struct, Component::Word));
+        assert!(!is_valid_combination(Scope::Variable, Component::Word));
+        assert!(!is_valid_combination(Scope::Member, Component::Word));
+        assert!(!is_valid_combination(Scope::Delimiter, Component::Word));
+    }
+
+    #[test]
+    fn definition_component_valid_combinations() {
+        assert!(is_valid_combination(Scope::Function, Component::Definition));
+        assert!(is_valid_combination(Scope::Variable, Component::Definition));
+        assert!(is_valid_combination(Scope::Struct, Component::Definition));
+    }
+
+    #[test]
+    fn definition_component_invalid_combinations() {
+        assert!(!is_valid_combination(Scope::Line, Component::Definition));
+        assert!(!is_valid_combination(Scope::Buffer, Component::Definition));
+        assert!(!is_valid_combination(Scope::Delimiter, Component::Definition));
+        assert!(!is_valid_combination(Scope::Member, Component::Definition));
+    }
+
+    #[test]
+    fn is_valid_list_positional_outside_false() {
+        assert!(!is_valid_list_positional(Positional::Outside));
+    }
+
+    #[test]
+    fn is_valid_list_positional_all_others_true() {
+        for pos in [
+            Positional::Inside,
+            Positional::Until,
+            Positional::After,
+            Positional::Before,
+            Positional::Next,
+            Positional::Previous,
+            Positional::Entire,
+            Positional::To,
+            Positional::Last,
+            Positional::First,
+        ] {
+            assert!(
+                is_valid_list_positional(pos),
+                "{pos:?} should be valid for List"
+            );
+        }
+    }
+
+    #[test]
+    fn action_list_requires_not_interactive() {
+        assert!(!Action::List.requires_interactive());
     }
 }

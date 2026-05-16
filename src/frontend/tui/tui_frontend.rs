@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::commands::chord::FrontendCapabilities;
-use crate::commands::chord_engine::types::{ChordAction, EditorMode};
-use crate::data::state::{EditorState, Mode};
+use crate::commands::chord_engine::types::{ChordAction, EditorMode, ListFrontend, ListItem};
+use crate::data::state::{EditorState, ListDialogState, Mode};
 
 use crate::frontend::traits::ApplyChordAction;
 
@@ -26,8 +26,25 @@ impl FrontendCapabilities for TuiFrontend {
     }
 }
 
+impl ListFrontend for TuiFrontend {
+    fn show_list(&mut self, state: &mut EditorState, items: &[ListItem]) -> Result<()> {
+        state.list_dialog = Some(ListDialogState {
+            items: items
+                .iter()
+                .map(|i| (i.val.clone(), i.line, i.col))
+                .collect(),
+            selected: 0,
+        });
+        Ok(())
+    }
+}
+
 impl ApplyChordAction for TuiFrontend {
     fn apply(&mut self, state: &mut EditorState, action: &ChordAction) -> Result<String> {
+        if !action.listed_items.is_empty() {
+            self.show_list(state, &action.listed_items)?;
+            return Ok(String::new());
+        }
         if let Some(ref diff) = action.diff
             && let Some(buf) = state.current_buffer_mut()
         {
@@ -104,6 +121,7 @@ mod tests {
             mode_after: Some(EditorMode::Edit),
             highlight_ranges: vec![],
             warnings: vec![],
+            listed_items: vec![],
         }
     }
 
@@ -120,6 +138,25 @@ mod tests {
     #[test]
     fn tui_frontend_is_interactive() {
         assert!(TuiFrontend::new().is_interactive());
+    }
+
+    // --- work item 0011: List action ---
+
+    #[test]
+    fn tui_show_list_populates_list_dialog_state() {
+        use crate::commands::chord_engine::types::ListItem;
+        let (_f, mut state) = make_state("hello\nworld");
+        let items = vec![
+            ListItem { val: "foo".to_string(), line: 2, col: 5 },
+            ListItem { val: "bar".to_string(), line: 7, col: 0 },
+        ];
+        let mut frontend = TuiFrontend::new();
+        frontend.show_list(&mut state, &items).unwrap();
+        let dialog = state.list_dialog.as_ref().expect("list_dialog should be set");
+        assert_eq!(dialog.items.len(), 2);
+        assert_eq!(dialog.items[0], ("foo".to_string(), 2, 5));
+        assert_eq!(dialog.items[1], ("bar".to_string(), 7, 0));
+        assert_eq!(dialog.selected, 0);
     }
 
     #[test]
