@@ -372,7 +372,6 @@ You can use keyboard navigation to position the cursor, then use mouse selection
 
 ---
 
-## See also
+---
 
-- [Using the TUI](03-using-the-tui.md) — Overview of editor modes and keybindings
-- [Getting Started](00-getting-started.md) — First steps with ane
+[<- Syntax Highlighting and Languages](09-syntax-highlighting-and-languages.md) | [Next: Listing, Words, and Definitions ->](11-listing-and-word-definition.md)

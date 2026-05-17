@@ -386,8 +386,6 @@ Then repeat for other lines without worrying about LSP symbol precision.
 
 ---
 
-## See Also
+---
 
-- [Chord System](01-chord-system.md) — full grammar reference
-- [Chord Examples](02-chord-examples.md) — exhaustive before/after examples
-- [Using the TUI](03-using-the-tui.md) — keybindings and list dialog behavior
+[<- Mouse Selection](10-mouse-selection.md)

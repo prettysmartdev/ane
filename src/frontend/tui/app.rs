@@ -1365,6 +1365,18 @@ fn handle_mouse(state: &mut EditorState, mouse: MouseEvent, editor_area: Rect) {
                 state.selection = None;
             }
         }
+        MouseEventKind::ScrollUp => {
+            let total = state.current_buffer().map_or(1, |b| b.line_count());
+            let gutter = format!("{}", total.saturating_sub(1)).len() + 1;
+            let tw = (editor_area.width as usize).saturating_sub(gutter);
+            move_cursor_up(state, tw);
+        }
+        MouseEventKind::ScrollDown => {
+            let total = state.current_buffer().map_or(1, |b| b.line_count());
+            let gutter = format!("{}", total.saturating_sub(1)).len() + 1;
+            let tw = (editor_area.width as usize).saturating_sub(gutter);
+            move_cursor_down(state, tw);
+        }
         _ => {}
     }
 }

@@ -37,15 +37,29 @@ Tree-sitter is fast and language-agnostic — it works offline and scales instan
 
 ## Supported languages
 
+### Languages with LSP + tree-sitter
+
 | Language | Tree-sitter | LSP Server | Detection |
 |----------|:-----------:|:----------:|-----------|
 | Rust | ✓ | ✓ (rust-analyzer) | `Cargo.toml` |
 | Go | ✓ | ✓ (gopls) | `go.mod`, `go.work` |
 | TypeScript / JavaScript | ✓ | ✓ (vtsls) | `package.json`, `tsconfig.json` |
 | Python | ✓ | ✓ (basedpyright) | `pyproject.toml`, `pyrightconfig.json`, `setup.py` |
-| Markdown | ✓ | — | `.md`, `.markdown` files |
 
-All listed languages have tree-sitter support and appear with syntax colors on open. Languages with LSP servers (all except Markdown) gain semantic highlighting once the server initializes.
+These languages get immediate tree-sitter highlighting on open, plus richer semantic coloring once the LSP server initializes. LSP-scoped chords (Function, Variable, Struct, Member) require the server to be ready.
+
+### Languages with tree-sitter only
+
+| Language | Tree-sitter | Detection |
+|----------|:-----------:|-----------|
+| Markdown | ✓ | `.md`, `.markdown` |
+| JSON | ✓ | `.json`, `.jsonc` |
+| YAML | ✓ | `.yaml`, `.yml` |
+| TOML | ✓ | `.toml` |
+| Dockerfile | ✓ | `Dockerfile` (filename), `.dockerfile` |
+| XML | ✓ | `.xml`, `.xsd`, `.xsl`, `.xslt`, `.svg`, `.rss` |
+
+These languages have no LSP server. Tree-sitter provides structural highlighting immediately on open. LSP-scoped chords are not available for these languages — use Line, Buffer, and Delimiter scopes instead.
 
 ---
 
@@ -157,6 +171,58 @@ Markdown is **tree-sitter only** — no LSP server. But it has its own rich synt
 
 *Italic requires terminal support; some terminals fall back to normal style.*
 
+### JSON / JSONC
+
+Tree-sitter distinguishes object keys from string values:
+
+- Object keys in **Cyan**
+- String values in **Green**
+- Numbers, `true`, `false`, `null` as keywords
+- JSONC comments (`//` and `/* */`) as dimmed comments
+
+Files over 512 KB (e.g., minified bundles) are rendered plain to avoid parsing timeouts.
+
+### YAML
+
+Mapping keys and values get distinct colors:
+
+- Mapping keys in **Cyan**
+- String scalars in **Green**
+- Integers and floats as numbers
+- Booleans and null as keywords
+- Anchors, aliases, and tags highlighted distinctly
+- Multi-document files (`---` separators) handled correctly
+
+### TOML
+
+Configuration keys and section headers stand out:
+
+- Section headers (`[section]`, `[[array]]`) highlighted as types
+- Bare and quoted keys in **Cyan**
+- Strings in **Green**
+- Dates and times rendered as numeric literals
+
+### Dockerfile
+
+Instructions and image references are visually distinct:
+
+- Instructions (FROM, RUN, COPY, etc.) as **keywords**
+- Image names as types, image tags as strings
+- Variable references (`${VAR}`) highlighted distinctly
+- Comments dimmed
+- Detection works for extensionless `Dockerfile` (case-insensitive filename)
+
+### XML / SVG
+
+Tag structure and attributes are clearly separated:
+
+- Tag names as types
+- Attribute names in **Cyan**
+- Attribute values in **Green**
+- Text content in default color
+- Comments and CDATA sections handled
+- SVG files (`.svg`) receive XML highlighting
+
 ---
 
 ## Syntax highlighting in different modes
@@ -196,6 +262,11 @@ Check the file extension and ensure ane recognizes the language:
 - `.ts`, `.tsx`, `.js`, `.jsx` → TypeScript / JavaScript
 - `.py` → Python
 - `.md`, `.markdown` → Markdown
+- `.json`, `.jsonc` → JSON
+- `.yaml`, `.yml` → YAML
+- `.toml` → TOML
+- `Dockerfile` → Dockerfile
+- `.xml`, `.xsd`, `.xsl`, `.xslt`, `.svg`, `.rss` → XML
 
 If the extension is unrecognized, ane renders the file in plain gray. Edit the file anyway — chords still work (except LSP-scoped ones).
 
@@ -220,4 +291,4 @@ Large files (> 50K lines) may see tree-sitter take longer, but still well under 
 
 ---
 
-[<- Compared to Other Editors](08-compared-to-other-editors.md)
+[<- Compared to Other Editors](08-compared-to-other-editors.md) | [Next: Mouse Selection ->](10-mouse-selection.md)

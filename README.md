@@ -86,16 +86,18 @@ sudo make install
 
 | Part | Codes | Description |
 |------|-------|-------------|
-| Action | `c`hange, `d`elete, `r`eplace, `y`ank, `a`ppend, `p`repend, `i`nsert, `j`ump | What to do |
-| Positional | `i`nside, `e`ntire, `a`fter, `b`efore, `u`ntil, `t`o, `o`utside, `n`ext, `p`revious | Where relative to scope |
+| Action | `c`hange, `d`elete, `r`eplace, `y`ank, `a`ppend, `p`repend, `i`nsert, `j`ump, `l`ist | What to do |
+| Positional | `i`nside, `e`ntire, `a`fter, `b`efore, `u`ntil, `t`o, `o`utside, `n`ext, `p`revious, `f`irst, `l`ast | Where relative to scope |
 | Scope | `l`ine, `b`uffer, `f`unction, `v`ariable, `s`truct, `m`ember, `d`elimiter | What language construct |
-| Component | `b`eginning, `c`ontents, `e`nd, `v`alue, `p`arameters, `a`rguments, `n`ame, `s`elf | Which part of the scope |
+| Component | `b`eginning, `c`ontents, `e`nd, `v`alue, `p`arameters, `a`rguments, `n`ame, `s`elf, `w`ord, `d`efinition | Which part of the scope |
 
 **Examples:**
 - `cifc` -- **C**hange **I**nside **F**unction **C**ontents (short form)
 - `ChangeInsideFunctionContents` -- same chord, long form
 - `cels(target:5, value:"new text")` -- change line 5 to "new text"
 - `jnfn` -- **J**ump **N**ext **F**unction **N**ame (move cursor to the next function)
+- `lefn` -- **L**ist **E**ntire **F**unction **N**ames (explore all functions in a file)
+- `cefd` -- **C**hange **E**ntire **F**unction **D**efinition (change a signature without touching the body)
 
 Chords that target language constructs (Function, Variable, Struct, Member) require an active LSP connection. Line, Buffer, and Delimiter scopes work without LSP.
 
@@ -136,12 +138,17 @@ ane path/to/file.rs
 | `Arrow keys` | Navigate (Edit/Chord: move cursor; Chord with input: left/right move chord cursor) |
 | `Enter` | Open file from tree / execute chord / newline (context-dependent) |
 | `Esc` | Return to Chord mode (Edit mode) / clear chord input (Chord mode) |
+| `Click` | Position cursor in editor |
+| `Click + drag` | Select text and copy to clipboard (line numbers excluded) |
+| `Shift + drag` | Native terminal selection (fallback) |
 
 **Modes:**
 - **Chord mode** (default): type a chord in the command box and press Enter to execute. Short-form chords are executed without 'Enter' if they are valid for the current cursor's position (i.e. `cifc` will automatically execute if the cursor is resting within a recognized function).
 - **Edit mode**: direct text editing of the open buffer. Toggle with `Ctrl-E` or press 'Esc' to exit edit mode.
 
-See [Using the TUI](docs/03-using-the-tui.md) for the full guide.
+**Top bar** shows: cursor position, LOC count, total lines, and approximate token count — useful for estimating LLM context usage.
+
+See [Using the TUI](docs/03-using-the-tui.md) for the full guide. See [Mouse Selection](docs/10-mouse-selection.md) for the full selection and clipboard reference.
 
 ## Exec Mode (for code agents)
 
@@ -200,15 +207,20 @@ ane natively integrates with language servers for language-aware chord operation
 
 Supported languages:
 
-| Language | LSP server | Detection |
-|----------|------------|-----------|
-| Rust | rust-analyzer | `Cargo.toml` |
-| Go | gopls | `go.mod`, `go.work` |
-| TypeScript / JavaScript | vtsls | `package.json`, `tsconfig.json` |
-| Python | basedpyright | `pyproject.toml`, `pyrightconfig.json`, `setup.py` |
-| Markdown | — | `.md`, `.markdown` |
+| Language | LSP server | Tree-sitter | Detection |
+|----------|------------|:-----------:|-----------|
+| Rust | rust-analyzer | ✓ | `Cargo.toml` |
+| Go | gopls | ✓ | `go.mod`, `go.work` |
+| TypeScript / JavaScript | vtsls | ✓ | `package.json`, `tsconfig.json` |
+| Python | basedpyright | ✓ | `pyproject.toml`, `pyrightconfig.json`, `setup.py` |
+| Markdown | — | ✓ | `.md`, `.markdown` |
+| JSON | — | ✓ | `.json`, `.jsonc` |
+| YAML | — | ✓ | `.yaml`, `.yml` |
+| TOML | — | ✓ | `.toml` |
+| Dockerfile | — | ✓ | `Dockerfile`, `.dockerfile` |
+| XML | — | ✓ | `.xml`, `.xsd`, `.xsl`, `.svg`, `.rss` |
 
-All languages include tree-sitter syntax highlighting. See [Syntax Highlighting and Languages](docs/09-syntax-highlighting-and-languages.md) for details.
+Languages with LSP servers support language-aware chords (Function, Variable, Struct, Member). All languages include tree-sitter syntax highlighting. See [Syntax Highlighting and Languages](docs/09-syntax-highlighting-and-languages.md) for details.
 
 See [LSP Integration](docs/06-lsp-integration.md) for details.
 
@@ -247,6 +259,9 @@ The full user guide is in [`docs/`](docs/contents.md):
 | 06 | [LSP Integration](docs/06-lsp-integration.md) | Language server setup and status |
 | 07 | [Architecture Overview](docs/07-architecture-overview.md) | Three-layer design |
 | 08 | [Compared to Other Editors](docs/08-compared-to-other-editors.md) | Trade-offs vs Vim, Emacs, Helix, etc. |
+| 09 | [Syntax Highlighting and Languages](docs/09-syntax-highlighting-and-languages.md) | Tree-sitter + LSP pipeline, supported languages |
+| 10 | [Mouse Selection](docs/10-mouse-selection.md) | Click-to-position, drag-to-select, clipboard |
+| 11 | [Listing, Words, and Definitions](docs/11-listing-and-word-definition.md) | List action, Word/Definition components, First/Last |
 
 ## Building
 
