@@ -39,7 +39,7 @@ fn resolve_buffer(
     lsp: &mut LspEngine,
 ) -> Result<BufferResolution> {
     if query.action == Action::List {
-        let listed_items = resolve_list(query, buffer, lsp, buffer_name)?;
+        let (listed_items, warnings) = resolve_list(query, buffer, lsp, buffer_name)?;
         return Ok(BufferResolution {
             target_ranges: vec![TextRange::point(0, 0)],
             scope_range: TextRange::point(0, 0),
@@ -48,7 +48,12 @@ fn resolve_buffer(
             cursor_destination: None,
             mode_after: None,
             listed_items,
+            warnings,
         });
+    }
+
+    if let Positional::Count(n) = query.positional {
+        return resolve_count_positional(query, buffer_name, buffer, lsp, n);
     }
 
     let scope_range = resolve_scope(query, buffer_name, buffer, lsp)?;
@@ -79,7 +84,250 @@ fn resolve_buffer(
         cursor_destination,
         mode_after,
         listed_items: vec![],
+        warnings: vec![],
     })
+}
+
+fn resolve_count_positional(
+    query: &ChordQuery,
+    buffer_name: &str,
+    buffer: &Buffer,
+    lsp: &mut LspEngine,
+    n: u8,
+) -> Result<BufferResolution> {
+    let (cursor_line, cursor_col) = query.args.cursor_pos.ok_or_else(|| {
+        ChordError::resolve(
+            buffer_name,
+            "numeric positional requires a cursor position; pass cursor:\"line,col\"",
+        )
+    })?;
+
+    let mut warnings: Vec<String> = Vec::new();
+
+    let (target_ranges, scope_range) = match query.scope {
+        Scope::Line => resolve_count_line(
+            query,
+            buffer,
+            buffer_name,
+            lsp,
+            n,
+            cursor_line,
+            cursor_col,
+            &mut warnings,
+        )?,
+        Scope::Function | Scope::Variable | Scope::Struct | Scope::Member => resolve_count_lsp(
+            query,
+            buffer_name,
+            lsp,
+            n,
+            cursor_line,
+            cursor_col,
+            &mut warnings,
+        )?,
+        Scope::Buffer | Scope::Delimiter => {
+            unreachable!("Count positional with Buffer/Delimiter rejected at parse time")
+        }
+    };
+
+    let replacement = query.args.value.clone();
+    let primary = target_ranges
+        .first()
+        .copied()
+        .unwrap_or(TextRange::point(cursor_line, cursor_col));
+    let (cursor_destination, mode_after) = resolve_cursor_and_mode(query, &primary);
+
+    Ok(BufferResolution {
+        target_ranges: target_ranges.clone(),
+        scope_range,
+        component_range: target_ranges
+            .first()
+            .copied()
+            .unwrap_or(TextRange::point(cursor_line, cursor_col)),
+        replacement,
+        cursor_destination,
+        mode_after,
+        listed_items: vec![],
+        warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_count_line(
+    query: &ChordQuery,
+    buffer: &Buffer,
+    buffer_name: &str,
+    lsp: &mut LspEngine,
+    n: u8,
+    cursor_line: usize,
+    cursor_col: usize,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<TextRange>, TextRange)> {
+    match query.component {
+        Component::Self_ => {
+            let available = buffer.line_count().saturating_sub(cursor_line);
+            let actual = (n as usize).min(available);
+            if actual < n as usize {
+                warnings.push(format!(
+                    "only {} of {} requested occurrences found",
+                    actual, n
+                ));
+            }
+            let end_line = cursor_line + actual.saturating_sub(1);
+            let end_col = buffer
+                .lines
+                .get(end_line)
+                .map(|l| line_char_count(l))
+                .unwrap_or(0);
+            let range = TextRange {
+                start_line: cursor_line,
+                start_col: 0,
+                end_line,
+                end_col,
+            };
+            Ok((vec![range], range))
+        }
+        Component::Word => {
+            let line_idx = cursor_line.min(buffer.line_count().saturating_sub(1));
+            let line = buffer.lines.get(line_idx).map(|l| l.as_str()).unwrap_or("");
+            let chars: Vec<char> = line.chars().collect();
+            let words = collect_words_in_range(&chars, 0, chars.len());
+
+            let current_word_end = find_current_word_end(&words, cursor_col);
+            let search_after = current_word_end.unwrap_or(cursor_col);
+            let next_words: Vec<(usize, usize)> = words
+                .iter()
+                .filter(|(s, _)| *s >= search_after && *s > cursor_col)
+                .copied()
+                .collect();
+
+            let actual = next_words.len().min(n as usize);
+            if actual < n as usize {
+                warnings.push(format!(
+                    "only {} of {} requested occurrences found",
+                    actual, n
+                ));
+            }
+
+            let target = if actual == 0 {
+                let end_col = chars.len();
+                TextRange {
+                    start_line: line_idx,
+                    start_col: end_col,
+                    end_line: line_idx,
+                    end_col,
+                }
+            } else {
+                let (_, end) = next_words[actual - 1];
+                TextRange {
+                    start_line: line_idx,
+                    start_col: cursor_col,
+                    end_line: line_idx,
+                    end_col: end,
+                }
+            };
+            let scope_range = TextRange {
+                start_line: line_idx,
+                start_col: 0,
+                end_line: line_idx,
+                end_col: chars.len(),
+            };
+            Ok((vec![target], scope_range))
+        }
+        _ => {
+            let scope_range = resolve_line_scope_at(buffer, cursor_line, buffer_name)?;
+            let component_range = resolve_component(query, buffer, &scope_range, buffer_name, lsp)?;
+            Ok((vec![component_range], scope_range))
+        }
+    }
+}
+
+fn resolve_line_scope_at(buffer: &Buffer, line: usize, buffer_name: &str) -> Result<TextRange> {
+    if buffer.line_count() == 0 {
+        return Err(
+            ChordError::resolve(buffer_name, "cannot resolve line scope on empty buffer").into(),
+        );
+    }
+    let line = line.min(buffer.line_count() - 1);
+    let line_len = line_char_count(&buffer.lines[line]);
+    Ok(TextRange {
+        start_line: line,
+        start_col: 0,
+        end_line: line,
+        end_col: line_len,
+    })
+}
+
+fn resolve_count_lsp(
+    query: &ChordQuery,
+    buffer_name: &str,
+    lsp: &mut LspEngine,
+    n: u8,
+    cursor_line: usize,
+    cursor_col: usize,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<TextRange>, TextRange)> {
+    let path = Path::new(buffer_name);
+    let symbols = lsp.document_symbols(path).map_err(|e| {
+        ChordError::resolve(
+            buffer_name,
+            format!("LSP not ready: {e}; LSP-scoped chords need an active language server"),
+        )
+    })?;
+
+    let target_kinds = scope_to_symbol_kinds(query.scope);
+    let mut flat: Vec<&DocumentSymbol> = Vec::new();
+    if target_kinds.is_empty() {
+        flatten_all_symbols(&symbols, &mut flat);
+    } else {
+        flatten_by_kind(&symbols, &target_kinds, &mut flat);
+    }
+    flat.sort_by(|a, b| {
+        a.range
+            .start_line
+            .cmp(&b.range.start_line)
+            .then(a.range.start_col.cmp(&b.range.start_col))
+    });
+
+    let after_cursor: Vec<&DocumentSymbol> = flat
+        .into_iter()
+        .filter(|s| {
+            s.range.start_line > cursor_line
+                || (s.range.start_line == cursor_line && s.range.start_col > cursor_col)
+        })
+        .collect();
+
+    let actual = after_cursor.len().min(n as usize);
+    if actual == 0 {
+        return Err(ChordError::resolve(
+            buffer_name,
+            format!(
+                "no {} symbol found after cursor ({cursor_line}, {cursor_col})",
+                query.scope.to_string().to_lowercase()
+            ),
+        )
+        .into());
+    }
+
+    if actual < n as usize {
+        warnings.push(format!(
+            "only {} of {} requested occurrences found",
+            actual, n
+        ));
+    }
+
+    let selected: Vec<&DocumentSymbol> = after_cursor.into_iter().take(actual).collect();
+
+    let first = &selected[0];
+    let last = &selected[actual - 1];
+    let scope_range = TextRange {
+        start_line: first.range.start_line,
+        start_col: first.range.start_col,
+        end_line: last.range.end_line,
+        end_col: last.range.end_col,
+    };
+
+    let target_ranges = vec![scope_range];
+    Ok((target_ranges, scope_range))
 }
 
 fn resolve_scope(
@@ -932,6 +1180,7 @@ fn apply_positional(
             Ok(vec![*component_range])
         }
         Positional::Last | Positional::First => Ok(vec![*component_range]),
+        Positional::Count(_) => Ok(vec![*component_range]),
     }
 }
 
@@ -2173,8 +2422,32 @@ fn resolve_list(
     buffer: &Buffer,
     lsp: &mut LspEngine,
     buffer_name: &str,
-) -> Result<Vec<ListItem>> {
+) -> Result<(Vec<ListItem>, Vec<String>)> {
     let mut items = collect_list_candidates(query, buffer, lsp, buffer_name)?;
+
+    if let Positional::Count(n) = query.positional {
+        let (cl, cc) = query.args.cursor_pos.ok_or_else(|| {
+            ChordError::resolve(
+                buffer_name,
+                "numeric positional requires a cursor position; pass cursor:\"line,col\"",
+            )
+        })?;
+        let after: Vec<ListItem> = items
+            .into_iter()
+            .filter(|item| item.line > cl || (item.line == cl && item.col > cc))
+            .collect();
+        let available = after.len();
+        let actual = available.min(n as usize);
+        let mut warnings = Vec::new();
+        if actual < n as usize {
+            warnings.push(format!(
+                "only {} of {} requested occurrences found",
+                actual, n
+            ));
+        }
+        let result: Vec<ListItem> = after.into_iter().take(actual).collect();
+        return Ok((result, warnings));
+    }
 
     if query.positional == Positional::Inside {
         let (cl, cc) = query.args.cursor_pos.ok_or_else(|| {
@@ -2194,13 +2467,13 @@ fn resolve_list(
                         || (item.line == range.end_line && item.col <= range.end_col))
             });
         }
-        return Ok(items);
+        return Ok((items, vec![]));
     }
 
     let cursor = query.args.cursor_pos;
     items = filter_list_by_positional(items, query.positional, cursor);
 
-    Ok(items)
+    Ok((items, vec![]))
 }
 
 fn collect_list_candidates(
@@ -2420,6 +2693,14 @@ fn filter_list_by_positional(
                 .collect()
         }
         Positional::Outside => items, // should not happen due to validation
+        Positional::Count(n) => {
+            let (cl, cc) = cursor.unwrap_or((0, 0));
+            items
+                .into_iter()
+                .filter(|item| item.line > cl || (item.line == cl && item.col > cc))
+                .take(n as usize)
+                .collect()
+        }
     }
 }
 
@@ -5592,6 +5873,365 @@ mod tests {
         assert_eq!(
             res.cursor_destination,
             Some(CursorPosition { line: 0, col: 3 })
+        );
+    }
+
+    // --- work item 0012: numeric positional ---
+
+    #[test]
+    fn count_3_line_self_selects_exactly_3_lines() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["line 0", "line 1", "line 2", "line 3", "line 4"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Change,
+            Positional::Count(3),
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(
+            res.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            res.warnings
+        );
+        assert_eq!(res.target_ranges.len(), 1);
+        let range = res.target_ranges[0];
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 2);
+        assert_eq!(range.end_col, 6, "end_col should be char count of 'line 2'");
+    }
+
+    #[test]
+    fn count_3_line_self_clamps_with_warning_when_fewer_lines() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["line 0", "line 1"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Change,
+            Positional::Count(3),
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.warnings.len(), 1);
+        assert!(
+            res.warnings[0].contains("2") && res.warnings[0].contains("3"),
+            "warning should mention 2 found and 3 requested: {}",
+            res.warnings[0]
+        );
+        let range = res.target_ranges[0];
+        assert_eq!(range.start_line, 0);
+        assert_eq!(range.end_line, 1);
+    }
+
+    #[test]
+    fn count_5_line_word_resolves_to_5th_word_boundary() {
+        let path = "/test/file.rs";
+        // "one two three four five six" — 6 words; cursor at col 0 (in "one")
+        // next_words after "one": two(4-7), three(8-13), four(14-18), five(19-23), six(24-27)
+        // 5th next word is "six", end_col = 27
+        let buffer = named_buf(path, &["one two three four five six"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Jump,
+            Positional::Count(5),
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(
+            res.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            res.warnings
+        );
+        assert_eq!(
+            res.target_ranges[0].end_col, 27,
+            "should reach the end of the 5th word 'six'"
+        );
+    }
+
+    #[test]
+    fn count_5_line_word_clamps_with_warning_when_fewer_words() {
+        let path = "/test/file.rs";
+        // "one two three" — cursor at col 0 (in "one")
+        // next_words after "one": two(4-7), three(8-13) — only 2 words
+        // n=5, actual=2, warning emitted, end_col=13
+        let buffer = named_buf(path, &["one two three"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Jump,
+            Positional::Count(5),
+            Scope::Line,
+            Component::Word,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.warnings.len(), 1);
+        assert!(
+            res.warnings[0].contains("2") && res.warnings[0].contains("5"),
+            "warning should mention 2 found and 5 requested: {}",
+            res.warnings[0]
+        );
+        assert_eq!(
+            res.target_ranges[0].end_col, 13,
+            "should reach end of 'three'"
+        );
+    }
+
+    #[test]
+    fn count_3_function_name_returns_3_symbols_after_cursor() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "// header",
+                "fn a() {}",
+                "fn b() {}",
+                "fn c() {}",
+                "fn d() {}",
+                "fn e() {}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("a", SymbolKind::Function, 1, 0, 1, 9),
+                sym("b", SymbolKind::Function, 2, 0, 2, 9),
+                sym("c", SymbolKind::Function, 3, 0, 3, 9),
+                sym("d", SymbolKind::Function, 4, 0, 4, 9),
+                sym("e", SymbolKind::Function, 5, 0, 5, 9),
+            ],
+        );
+
+        let q = query(
+            Action::Change,
+            Positional::Count(3),
+            Scope::Function,
+            Component::Name,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(
+            res.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            res.warnings
+        );
+        assert_eq!(
+            res.scope_range.start_line, 1,
+            "should start at first function after cursor"
+        );
+        assert_eq!(
+            res.scope_range.end_line, 3,
+            "should end at 3rd function (line 3)"
+        );
+    }
+
+    #[test]
+    fn count_3_function_definition_returns_3_ranges_after_cursor() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "// header",
+                "fn a() {}",
+                "fn b() {}",
+                "fn c() {}",
+                "fn d() {}",
+                "fn e() {}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("a", SymbolKind::Function, 1, 0, 1, 9),
+                sym("b", SymbolKind::Function, 2, 0, 2, 9),
+                sym("c", SymbolKind::Function, 3, 0, 3, 9),
+                sym("d", SymbolKind::Function, 4, 0, 4, 9),
+                sym("e", SymbolKind::Function, 5, 0, 5, 9),
+            ],
+        );
+
+        let q = query(
+            Action::Change,
+            Positional::Count(3),
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert!(
+            res.warnings.is_empty(),
+            "expected no warnings: {:?}",
+            res.warnings
+        );
+        assert_eq!(
+            res.scope_range.start_line, 1,
+            "should start at first function after cursor"
+        );
+        assert_eq!(
+            res.scope_range.end_line, 3,
+            "should end at 3rd function (line 3)"
+        );
+    }
+
+    #[test]
+    fn count_positional_requires_cursor_errors_without_cursor() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["line 0", "line 1", "line 2"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+
+        let q = query(
+            Action::Change,
+            Positional::Count(3),
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            None,
+        );
+        let result = resolve(&q, &buffers, &mut lsp);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("cursor"), "expected 'cursor' in error: {msg}");
+    }
+
+    #[test]
+    fn list_count_requires_cursor_errors_without_cursor() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn a() {}", "fn b() {}", "fn c() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("a", SymbolKind::Function, 0, 0, 0, 9),
+                sym("b", SymbolKind::Function, 1, 0, 1, 9),
+                sym("c", SymbolKind::Function, 2, 0, 2, 9),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Count(3),
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            None,
+        );
+        let result = resolve(&q, &buffers, &mut lsp);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("cursor"), "expected 'cursor' in error: {msg}");
+    }
+
+    #[test]
+    fn list_count_emits_warning_when_clamped() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn a() {}", "fn b() {}", "fn c() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("a", SymbolKind::Function, 0, 0, 0, 9),
+                sym("b", SymbolKind::Function, 1, 0, 1, 9),
+                sym("c", SymbolKind::Function, 2, 0, 2, 9),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Count(9),
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 2, "should list b and c");
+        assert_eq!(res.warnings.len(), 1);
+        assert!(
+            res.warnings[0].contains("2") && res.warnings[0].contains("9"),
+            "warning should mention 2 found and 9 requested: {}",
+            res.warnings[0]
+        );
+    }
+
+    #[test]
+    fn list_count_no_warning_when_exact_match() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn a() {}", "fn b() {}", "fn c() {}", "fn d() {}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(
+            path,
+            vec![
+                sym("a", SymbolKind::Function, 0, 0, 0, 9),
+                sym("b", SymbolKind::Function, 1, 0, 1, 9),
+                sym("c", SymbolKind::Function, 2, 0, 2, 9),
+                sym("d", SymbolKind::Function, 3, 0, 3, 9),
+            ],
+        );
+
+        let q = query(
+            Action::List,
+            Positional::Count(3),
+            Scope::Function,
+            Component::Definition,
+            None,
+            None,
+            Some((0, 0)),
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.listed_items.len(), 3);
+        assert!(
+            res.warnings.is_empty(),
+            "no warning when count matches exactly"
         );
     }
 }

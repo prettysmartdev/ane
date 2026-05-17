@@ -60,6 +60,7 @@ pub struct BufferResolution {
     pub cursor_destination: Option<CursorPosition>,
     pub mode_after: Option<EditorMode>,
     pub listed_items: Vec<ListItem>,
+    pub warnings: Vec<String>,
 }
 
 impl BufferResolution {

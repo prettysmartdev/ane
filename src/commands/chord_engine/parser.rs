@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::data::chord_types::{
-    Action, Component, Positional, Scope, is_valid_combination, is_valid_jump_combination,
-    is_valid_list_positional,
+    Action, Component, Positional, Scope, is_valid_combination, is_valid_count_scope,
+    is_valid_jump_combination, is_valid_list_positional,
 };
 
 use super::errors::ChordError;
@@ -15,6 +15,8 @@ pub fn parse(input: &str) -> Result<ChordQuery> {
     }
 
     let (chord_part, raw_args) = split_chord_and_args(input)?;
+
+    check_multi_digit_count(chord_part, input)?;
 
     if let Some(query) = try_parse_short_form(chord_part, &raw_args, input)? {
         return Ok(query);
@@ -151,6 +153,14 @@ fn try_parse_short_form(
         Some(a) => a,
         None => return Ok(None),
     };
+    if chars[1] == "0" {
+        return Err(ChordError::parse(
+            _original_input,
+            1,
+            "count must be 1\u{2013}9; 0 is not a valid positional",
+        )
+        .into());
+    }
     let positional = match Positional::from_short(chars[1]) {
         Some(p) => p,
         None => return Ok(None),
@@ -166,6 +176,25 @@ fn try_parse_short_form(
 
     if !is_valid_combination(scope, component) {
         return Err(ChordError::invalid_combination(scope, component).into());
+    }
+
+    if let Positional::Count(_) = positional {
+        if !is_valid_count_scope(scope) {
+            let reason = if scope == Scope::Buffer {
+                "numeric positional is not valid for Buffer scope: there is only one buffer"
+            } else {
+                "numeric positional is not valid for Delimiter scope"
+            };
+            return Err(ChordError::parse(_original_input, 0, reason).into());
+        }
+        if action == Action::Replace {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "Replace action with numeric positional is not supported",
+            )
+            .into());
+        }
     }
 
     if matches!(scope, Scope::Delimiter)
@@ -256,6 +285,14 @@ fn try_parse_long_form(
         Some(r) => r,
         None => return Ok(None),
     };
+    if rest.starts_with('0') {
+        return Err(ChordError::parse(
+            _original_input,
+            0,
+            "count must be 1\u{2013}9; 0 is not a valid positional",
+        )
+        .into());
+    }
     let (positional, rest) = match parse_long_positional(rest) {
         Some(r) => r,
         None => return Ok(None),
@@ -271,6 +308,25 @@ fn try_parse_long_form(
 
     if !is_valid_combination(scope, component) {
         return Err(ChordError::invalid_combination(scope, component).into());
+    }
+
+    if let Positional::Count(_) = positional {
+        if !is_valid_count_scope(scope) {
+            let reason = if scope == Scope::Buffer {
+                "numeric positional is not valid for Buffer scope: there is only one buffer"
+            } else {
+                "numeric positional is not valid for Delimiter scope"
+            };
+            return Err(ChordError::parse(_original_input, 0, reason).into());
+        }
+        if action == Action::Replace {
+            return Err(ChordError::parse(
+                _original_input,
+                0,
+                "Replace action with numeric positional is not supported",
+            )
+            .into());
+        }
     }
 
     if matches!(scope, Scope::Delimiter)
@@ -352,6 +408,37 @@ fn try_parse_long_form(
     }))
 }
 
+fn check_multi_digit_count(chord_part: &str, original: &str) -> Result<()> {
+    let chars: Vec<char> = chord_part.chars().collect();
+    if chars.len() >= 3
+        && Action::from_short(&chars[0].to_string()).is_some()
+        && chars[1].is_ascii_digit()
+        && chars[2].is_ascii_digit()
+    {
+        return Err(ChordError::parse(
+            original,
+            1,
+            "only single-digit counts (1\u{2013}9) are supported",
+        )
+        .into());
+    }
+
+    if let Some((_, rest)) = parse_long_action(chord_part) {
+        let rest_chars: Vec<char> = rest.chars().collect();
+        if rest_chars.len() >= 2 && rest_chars[0].is_ascii_digit() && rest_chars[1].is_ascii_digit()
+        {
+            return Err(ChordError::parse(
+                original,
+                0,
+                "only single-digit counts (1\u{2013}9) are supported",
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_long_action(input: &str) -> Option<(Action, &str)> {
     let pairs = [
         ("Change", Action::Change),
@@ -373,6 +460,14 @@ fn parse_long_action(input: &str) -> Option<(Action, &str)> {
 }
 
 fn parse_long_positional(input: &str) -> Option<(Positional, &str)> {
+    if let Some(ch) = input.chars().next()
+        && ch.is_ascii_digit()
+        && ch != '0'
+    {
+        let n = ch as u8 - b'0';
+        return Some((Positional::Count(n), &input[1..]));
+    }
+
     let pairs = [
         ("Inside", Positional::Inside),
         ("Until", Positional::Until),
@@ -1201,5 +1296,155 @@ mod tests {
         assert_eq!(short.positional, long.positional);
         assert_eq!(short.scope, long.scope);
         assert_eq!(short.component, long.component);
+    }
+
+    // --- work item 0012: numeric positional ---
+
+    #[test]
+    fn count_j5lw_parses_to_jump_count5_line_word() {
+        let q = parse("j5lw").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::Count(5));
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Word);
+        assert!(!q.requires_lsp);
+    }
+
+    #[test]
+    fn count_j1ls_parses_to_jump_count1_line_self() {
+        let q = parse("j1ls").unwrap();
+        assert_eq!(q.action, Action::Jump);
+        assert_eq!(q.positional, Positional::Count(1));
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Self_);
+    }
+
+    #[test]
+    fn count_l9fd_parses_to_list_count9_function_definition() {
+        let q = parse("l9fd").unwrap();
+        assert_eq!(q.action, Action::List);
+        assert_eq!(q.positional, Positional::Count(9));
+        assert_eq!(q.scope, Scope::Function);
+        assert_eq!(q.component, Component::Definition);
+        assert!(q.requires_lsp);
+    }
+
+    #[test]
+    fn count_c3ls_parses_to_change_count3_line_self() {
+        let q = parse("c3ls").unwrap();
+        assert_eq!(q.action, Action::Change);
+        assert_eq!(q.positional, Positional::Count(3));
+        assert_eq!(q.scope, Scope::Line);
+        assert_eq!(q.component, Component::Self_);
+        assert!(!q.requires_lsp);
+    }
+
+    #[test]
+    fn count_zero_positional_errors_with_range_message() {
+        let result = parse("j0lw");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("0") || msg.contains("count"),
+            "expected '0' or 'count' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn count_buffer_scope_rejected() {
+        let result = parse("j5bs");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Buffer") || msg.contains("numeric"),
+            "expected Buffer/numeric in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn count_delimiter_scope_rejected() {
+        let result = parse("j5ds");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Delimiter") || msg.contains("numeric"),
+            "expected Delimiter/numeric in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn long_form_jump5lineword_matches_j5lw() {
+        let short = parse("j5lw").unwrap();
+        let long = parse("Jump5LineWord").unwrap();
+        assert_eq!(short.action, long.action);
+        assert_eq!(short.positional, long.positional);
+        assert_eq!(short.scope, long.scope);
+        assert_eq!(short.component, long.component);
+    }
+
+    #[test]
+    fn long_form_list9functiondefinition_matches_l9fd() {
+        let short = parse("l9fd").unwrap();
+        let long = parse("List9FunctionDefinition").unwrap();
+        assert_eq!(short.action, long.action);
+        assert_eq!(short.positional, long.positional);
+        assert_eq!(short.scope, long.scope);
+        assert_eq!(short.component, long.component);
+    }
+
+    #[test]
+    fn count_short_form_round_trip_emits_digit() {
+        let q = parse("j5lw").unwrap();
+        assert_eq!(q.short_form(), "j5lw");
+    }
+
+    #[test]
+    fn count_long_form_round_trip_emits_digit_inline() {
+        let q = parse("j5lw").unwrap();
+        assert_eq!(q.long_form(), "Jump5LineWord");
+    }
+
+    #[test]
+    fn count_replace_action_rejected() {
+        let result = parse("r5ls");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Replace") || msg.contains("numeric"),
+            "expected Replace/numeric in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn multi_digit_short_form_errors_with_single_digit_message() {
+        let result = parse("j15lw");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("single-digit"),
+            "expected 'single-digit' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn multi_digit_long_form_errors_with_single_digit_message() {
+        let result = parse("Jump15LineWord");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("single-digit"),
+            "expected 'single-digit' in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn multi_digit_with_zero_short_form_errors_with_single_digit_message() {
+        let result = parse("j10lw");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("single-digit"),
+            "expected 'single-digit' in error: {msg}"
+        );
     }
 }

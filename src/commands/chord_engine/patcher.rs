@@ -37,7 +37,7 @@ fn build_action(
     query: &ChordQuery,
 ) -> Result<ChordAction> {
     let original = buffer.content();
-    let mut warnings = Vec::new();
+    let mut warnings = resolution.warnings.clone();
 
     if resolution.target_ranges.is_empty() {
         return Err(ChordError::patch(buffer_name, "no target ranges resolved").into());
@@ -51,7 +51,7 @@ fn build_action(
             cursor_destination: None,
             mode_after: None,
             highlight_ranges: vec![],
-            warnings: vec![],
+            warnings: resolution.warnings.clone(),
             listed_items: resolution.listed_items.clone(),
         });
     }
@@ -287,6 +287,7 @@ mod tests {
             cursor_destination: cursor,
             mode_after: mode,
             listed_items: vec![],
+            warnings: vec![],
         }
     }
 
@@ -303,6 +304,7 @@ mod tests {
             cursor_destination: None,
             mode_after: None,
             listed_items: vec![],
+            warnings: vec![],
         }
     }
 
@@ -754,6 +756,7 @@ mod tests {
                     col: 3,
                 },
             ],
+            warnings: vec![],
         };
         let mut resolutions = HashMap::new();
         resolutions.insert(name.to_string(), resolution);

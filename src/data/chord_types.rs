@@ -26,6 +26,7 @@ pub enum Positional {
     To,
     Last,
     First,
+    Count(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -102,6 +103,16 @@ impl Positional {
             Self::To => "t",
             Self::Last => "l",
             Self::First => "f",
+            Self::Count(1) => "1",
+            Self::Count(2) => "2",
+            Self::Count(3) => "3",
+            Self::Count(4) => "4",
+            Self::Count(5) => "5",
+            Self::Count(6) => "6",
+            Self::Count(7) => "7",
+            Self::Count(8) => "8",
+            Self::Count(9) => "9",
+            Self::Count(_) => unreachable!(),
         }
     }
 
@@ -118,6 +129,15 @@ impl Positional {
             "t" => Some(Self::To),
             "l" => Some(Self::Last),
             "f" => Some(Self::First),
+            "1" => Some(Self::Count(1)),
+            "2" => Some(Self::Count(2)),
+            "3" => Some(Self::Count(3)),
+            "4" => Some(Self::Count(4)),
+            "5" => Some(Self::Count(5)),
+            "6" => Some(Self::Count(6)),
+            "7" => Some(Self::Count(7)),
+            "8" => Some(Self::Count(8)),
+            "9" => Some(Self::Count(9)),
             _ => None,
         }
     }
@@ -216,6 +236,10 @@ pub fn is_valid_combination(scope: Scope, component: Component) -> bool {
     }
 }
 
+pub fn is_valid_count_scope(scope: Scope) -> bool {
+    !matches!(scope, Scope::Buffer | Scope::Delimiter)
+}
+
 pub fn is_valid_list_positional(positional: Positional) -> bool {
     !matches!(positional, Positional::Outside)
 }
@@ -260,6 +284,7 @@ impl fmt::Display for Positional {
             Self::To => write!(f, "To"),
             Self::Last => write!(f, "Last"),
             Self::First => write!(f, "First"),
+            Self::Count(n) => write!(f, "{n}"),
         }
     }
 }
