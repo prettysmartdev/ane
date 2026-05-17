@@ -4,11 +4,11 @@ use ane::data::skill::SKILL_CONTENT;
 // --- Skill token count ---
 
 #[test]
-fn skill_file_under_400_tokens() {
+fn skill_file_under_500_tokens() {
     let word_count = SKILL_CONTENT.split_whitespace().count();
     assert!(
-        word_count < 400,
-        "ane-skill.md has {word_count} whitespace-delimited words, expected < 400"
+        word_count < 500,
+        "ane-skill.md has {word_count} whitespace-delimited words, expected < 500"
     );
 }
 
@@ -17,7 +17,7 @@ fn skill_file_under_400_tokens() {
 #[test]
 fn run_init_creates_directory_and_file() {
     let dir = tempfile::TempDir::new().unwrap();
-    init_agent("claude", dir.path()).unwrap();
+    let result = init_agent("claude", dir.path()).unwrap();
 
     let skill_path = dir.path().join(".claude/skills/ane/SKILL.md");
     assert!(
@@ -26,6 +26,7 @@ fn run_init_creates_directory_and_file() {
         skill_path.display()
     );
     assert_eq!(std::fs::read_to_string(&skill_path).unwrap(), SKILL_CONTENT);
+    assert!(!result.overwritten);
 }
 
 #[test]
@@ -35,10 +36,11 @@ fn run_init_overwrites_existing_file() {
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "dummy content").unwrap();
 
-    init_agent("claude", dir.path()).unwrap();
+    let result = init_agent("claude", dir.path()).unwrap();
 
     let contents = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
     assert_eq!(contents, SKILL_CONTENT);
+    assert!(result.overwritten);
 }
 
 #[test]

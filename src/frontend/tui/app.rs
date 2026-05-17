@@ -22,6 +22,7 @@ use ratatui::{
 use crate::commands::chord_engine::{ChordEngine, parens_balanced};
 use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
 use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
+use crate::data::buffer::Buffer;
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
 use crate::data::state::{EditorState, Mode, Selection};
 
@@ -830,7 +831,11 @@ fn handle_open_modal(
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(path) = state.pending_open_path.take() {
                 if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                    buf.dirty = false;
+                    if let Ok(fresh) = Buffer::from_file(&buf.path) {
+                        *buf = fresh;
+                    } else {
+                        buf.dirty = false;
+                    }
                 }
                 let _ = state.open_file(&path);
                 refresh_buffer_caches(state, syntax_engine);

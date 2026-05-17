@@ -485,3 +485,147 @@ fn stdin_sentinel_piped_content_replaces_value_parameter() {
         "old content should be gone: {on_disk}"
     );
 }
+
+#[test]
+fn stdin_multiline_value_replaces_single_line() {
+    let f = temp_rs_file("line one\nline two\nline three\n");
+
+    let mut child = Command::new(ANE_BIN)
+        .args([
+            "exec",
+            "--chord",
+            "cels(target:0, value:-)",
+            &f.path().to_string_lossy(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ane binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"replaced first\nreplaced second\n").unwrap();
+    }
+    let output = child.wait_with_output().expect("wait failed");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let on_disk = std::fs::read_to_string(f.path()).unwrap();
+    assert!(
+        on_disk.contains("replaced first\nreplaced second"),
+        "multiline stdin should be applied: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("line one"),
+        "original line should be gone: {on_disk}"
+    );
+}
+
+#[test]
+fn stdin_find_sentinel_pipes_find_pattern() {
+    let f = temp_rs_file("hello world\n");
+
+    let mut child = Command::new(ANE_BIN)
+        .args([
+            "exec",
+            "--chord",
+            r#"rels(target:0, find:-, replace:"goodbye")"#,
+            &f.path().to_string_lossy(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ane binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"hello\n").unwrap();
+    }
+    let output = child.wait_with_output().expect("wait failed");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let on_disk = std::fs::read_to_string(f.path()).unwrap();
+    assert!(
+        on_disk.contains("goodbye world"),
+        "find from stdin should match: {on_disk}"
+    );
+}
+
+#[test]
+fn stdin_replace_sentinel_pipes_replacement_text() {
+    let f = temp_rs_file("hello world\n");
+
+    let mut child = Command::new(ANE_BIN)
+        .args([
+            "exec",
+            "--chord",
+            r#"rels(target:0, find:"hello", replace:-)"#,
+            &f.path().to_string_lossy(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ane binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"goodbye\n").unwrap();
+    }
+    let output = child.wait_with_output().expect("wait failed");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let on_disk = std::fs::read_to_string(f.path()).unwrap();
+    assert!(
+        on_disk.contains("goodbye world"),
+        "replace from stdin should apply: {on_disk}"
+    );
+}
+
+#[test]
+fn stdin_target_sentinel_pipes_target_name() {
+    let f = temp_rs_file("alpha\nbeta\ngamma\n");
+
+    let mut child = Command::new(ANE_BIN)
+        .args([
+            "exec",
+            "--chord",
+            r#"cels(target:-, value:"replaced")"#,
+            &f.path().to_string_lossy(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn ane binary");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"1\n").unwrap();
+    }
+    let output = child.wait_with_output().expect("wait failed");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let on_disk = std::fs::read_to_string(f.path()).unwrap();
+    assert!(
+        on_disk.contains("replaced"),
+        "target from stdin should select the line: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("beta"),
+        "line 1 should be replaced: {on_disk}"
+    );
+}

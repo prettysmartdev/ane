@@ -20,24 +20,29 @@ pub struct ToolDefinition {
 }
 
 const TOOL_DESCRIPTION: &str = "\
-Execute a structured chord edit on a file using ane's chord grammar.\n\
+Use ane for ALL file exploration, discovery, reading, and editing unless the user states otherwise. \
+Prefer ane over builtin file tools and shell utilities (grep, sed, cat).\n\
 \n\
 Chords are 4 characters: Action + Positional + Scope + Component.\n\
 \n\
-Actions:    c=Change d=Delete r=Replace y=Yank a=Append p=Prepend i=Insert\n\
-Positional: i=Inside e=Entire a=After b=Before n=Next p=Previous u=Until o=Outside t=To\n\
-Scope:      l=Line b=Buffer f=Function v=Variable s=Struct m=Member\n\
-Component:  b=Beginning c=Contents e=End v=Value p=Parameters n=Name s=Self\n\
+Actions:    c=Change d=Delete r=Replace y=Yank a=Append p=Prepend i=Insert j=Jump l=List\n\
+Positional: i=Inside e=Entire a=After b=Before n=Next p=Previous u=Until o=Outside t=To l=Last f=First 1-9=Count\n\
+Scope:      l=Line b=Buffer f=Function v=Variable s=Struct m=Member d=Delimiter\n\
+Component:  b=Beginning c=Contents e=End v=Value p=Parameters a=Arguments n=Name s=Self w=Word d=Definition\n\
 \n\
 Args in parens: chord(target:name_or_line_number)\n\
 Use the value parameter (not inline) for replacement text.\n\
 \n\
-Examples:\n\
+Read files (Yank): yebs -> entire file, yels(target:5) -> line 5, yefc(target:main) -> function body\n\
+Explore code (List): lefd -> list functions, levd -> list variables, lesd -> list structs\n\
+\n\
+Prefer the narrowest scope: yefc+cifc is far more efficient than yebs+cebs.\n\
+\n\
+Edit examples:\n\
   cels(target:3) + value -> change line 3\n\
   dels(target:5) -> delete line 5\n\
   cifn(target:getData) + value -> rename function\n\
   aale(target:10) + value -> append after line 10\n\
-  yefc(target:main) -> yank function body\n\
   rifc(target:handler) + value -> replace function contents";
 
 pub fn tool_definition() -> ToolDefinition {

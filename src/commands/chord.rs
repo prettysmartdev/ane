@@ -183,7 +183,12 @@ fn resolve_stdin_sentinels(chord: &mut ChordQuery) -> Result<()> {
         chord.args.value = Some(stdin_content.clone());
     }
     if chord.args.target_name.as_deref() == Some("-") {
-        chord.args.target_name = Some(stdin_content.clone());
+        if let Ok(n) = stdin_content.parse::<usize>() {
+            chord.args.target_name = None;
+            chord.args.target_line = Some(n);
+        } else {
+            chord.args.target_name = Some(stdin_content.clone());
+        }
     }
     if chord.args.find.as_deref() == Some("-") {
         chord.args.find = Some(stdin_content.clone());
@@ -256,6 +261,23 @@ mod tests {
             result.unwrap_err().to_string(),
             "chord parameter '-' requires piped input on stdin"
         );
+    }
+
+    #[test]
+    fn resolve_stdin_sentinels_noop_when_no_sentinel() {
+        let mut chord = parse_chord("cels").unwrap();
+        chord.args.target_line = Some(0);
+        chord.args.value = Some("literal text".to_string());
+
+        resolve_stdin_sentinels(&mut chord).unwrap();
+        assert_eq!(chord.args.value.as_deref(), Some("literal text"));
+    }
+
+    #[test]
+    fn resolve_stdin_sentinels_noop_when_no_args() {
+        let mut chord = parse_chord("cels").unwrap();
+        resolve_stdin_sentinels(&mut chord).unwrap();
+        assert!(chord.args.value.is_none());
     }
 
     // --- error message formats ---

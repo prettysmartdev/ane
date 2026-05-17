@@ -35,10 +35,15 @@ fn main() -> Result<()> {
 }
 
 fn run_init(agent_name: &str) -> Result<()> {
-    let config = ane::data::init::init_agent(agent_name, std::path::Path::new("."))?;
-    let skill_path = std::path::Path::new(config.skill_dir).join(config.skill_filename);
-    println!("wrote ane skill to {}", skill_path.display());
-    if let Some(note) = config.manual_note {
+    let result = ane::data::init::init_agent(agent_name, std::path::Path::new("."))?;
+    let skill_path =
+        std::path::Path::new(result.config.skill_dir).join(result.config.skill_filename);
+    if result.overwritten {
+        println!("updated ane skill at {}", skill_path.display());
+    } else {
+        println!("wrote ane skill to {}", skill_path.display());
+    }
+    if let Some(note) = result.config.manual_note {
         println!("note: {note}");
     }
     Ok(())

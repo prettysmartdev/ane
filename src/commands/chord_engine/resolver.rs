@@ -1279,10 +1279,12 @@ fn resolve_cursor_and_mode(
         Action::Yank | Action::List => (None, None),
         Action::Jump => {
             let cursor = match query.positional {
-                Positional::To | Positional::Until | Positional::Before => CursorPosition {
-                    line: target_range.end_line,
-                    col: target_range.end_col,
-                },
+                Positional::To | Positional::Until | Positional::Before | Positional::Count(_) => {
+                    CursorPosition {
+                        line: target_range.end_line,
+                        col: target_range.end_col,
+                    }
+                }
                 _ => CursorPosition {
                     line: target_range.start_line,
                     col: target_range.start_col,
