@@ -33,6 +33,14 @@ use super::status_bar;
 use super::title_bar;
 use super::tree_pane;
 
+fn refresh_buffer_caches(state: &mut EditorState, syntax_engine: &mut SyntaxEngine) {
+    if let Some(buf) = state.current_buffer() {
+        let content = buf.content();
+        syntax_engine.compute(&buf.path, &content);
+        state.cached_token_count = title_bar::compute_token_count(&content);
+    }
+}
+
 fn prev_char_boundary(s: &str, from: usize) -> usize {
     let mut idx = from.min(s.len());
     while idx > 0 && !s.is_char_boundary(idx) {
@@ -343,9 +351,7 @@ pub fn run(path: &Path) -> Result<()> {
     );
 
     // Initial compute for the opened file
-    if let Some(buf) = state.current_buffer() {
-        syntax_engine.compute(&buf.path, &buf.content());
-    }
+    refresh_buffer_caches(&mut state, &mut syntax_engine);
 
     // Status polling thread — polls all server statuses
     {
@@ -481,9 +487,7 @@ fn event_loop(
                     );
                     if buffer_modified {
                         state.selection = None;
-                        if let Some(buf) = state.current_buffer() {
-                            syntax_engine.compute(&buf.path, &buf.content());
-                        }
+                        refresh_buffer_caches(state, syntax_engine);
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -820,9 +824,7 @@ fn handle_open_modal(
             }
             if let Some(path) = state.pending_open_path.take() {
                 let _ = state.open_file(&path);
-                if let Some(buf) = state.current_buffer() {
-                    syntax_engine.compute(&buf.path, &buf.content());
-                }
+                refresh_buffer_caches(state, syntax_engine);
             }
         }
         KeyCode::Char('o') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -831,9 +833,7 @@ fn handle_open_modal(
                     buf.dirty = false;
                 }
                 let _ = state.open_file(&path);
-                if let Some(buf) = state.current_buffer() {
-                    syntax_engine.compute(&buf.path, &buf.content());
-                }
+                refresh_buffer_caches(state, syntax_engine);
             }
         }
         KeyCode::Esc => {
@@ -909,9 +909,7 @@ fn handle_tree_keys(
                     state.pending_open_path = Some(path);
                 } else {
                     let _ = state.open_file(&path);
-                    if let Some(buf) = state.current_buffer() {
-                        syntax_engine.compute(&buf.path, &buf.content());
-                    }
+                    refresh_buffer_caches(state, syntax_engine);
                 }
             }
         }
@@ -984,9 +982,7 @@ fn handle_chord_mode(
                     {
                         state.chord_history.push(input.clone());
                     }
-                    if let Some(buf) = state.current_buffer() {
-                        syntax_engine.compute(&buf.path, &buf.content());
-                    }
+                    refresh_buffer_caches(state, syntax_engine);
                 }
                 Err(_) => {
                     state.chord_error = true;
@@ -1045,9 +1041,7 @@ fn try_auto_submit(
                 state.chord_history.push(input_clone);
             }
             state.chord_running = false;
-            if let Some(buf) = state.current_buffer() {
-                syntax_engine.compute(&buf.path, &buf.content());
-            }
+            refresh_buffer_caches(state, syntax_engine);
         }
     } else if input.ends_with(')')
         && input.chars().next().is_some_and(|c| c.is_uppercase())
@@ -1066,9 +1060,7 @@ fn try_auto_submit(
             state.chord_history.push(input_clone);
         }
         state.chord_running = false;
-        if let Some(buf) = state.current_buffer() {
-            syntax_engine.compute(&buf.path, &buf.content());
-        }
+        refresh_buffer_caches(state, syntax_engine);
     }
 }
 
@@ -1900,6 +1892,37 @@ mod tests {
         assert!(
             state.status_msg.is_empty(),
             "no status message when there's nothing to copy"
+        );
+    }
+
+    // --- work item 0010: title-bar token count cache ---
+
+    #[test]
+    fn cached_token_count_updates_after_buffer_modified() {
+        let (_f, mut state) = make_state_with_lines(&["hello world"]);
+        state.mode = Mode::Edit;
+        assert_eq!(
+            state.cached_token_count, 0,
+            "token count starts at 0 before any update"
+        );
+
+        let modified = handle_edit_mode(&mut state, KeyCode::Char('!'), KeyModifiers::empty(), 80);
+        assert!(
+            modified,
+            "typing a char in Edit mode must report modification"
+        );
+
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        refresh_buffer_caches(&mut state, &mut syntax);
+
+        assert!(
+            state.cached_token_count > 0,
+            "cached_token_count must be non-zero after refresh_buffer_caches"
         );
     }
 }

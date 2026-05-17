@@ -244,6 +244,7 @@ mod tests {
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
             list_dialog: None,
+            cached_token_count: 0,
         }
     }
 

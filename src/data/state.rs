@@ -74,6 +74,7 @@ pub struct EditorState {
     pub lsp_state: Arc<Mutex<LspSharedState>>,
     pub selection: Option<Selection>,
     pub list_dialog: Option<ListDialogState>,
+    pub cached_token_count: usize,
 }
 
 impl EditorState {
@@ -109,6 +110,7 @@ impl EditorState {
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
             list_dialog: None,
+            cached_token_count: 0,
         })
     }
 
@@ -146,6 +148,7 @@ impl EditorState {
             lsp_state: Arc::new(Mutex::new(LspSharedState::default())),
             selection: None,
             list_dialog: None,
+            cached_token_count: 0,
         })
     }
 
