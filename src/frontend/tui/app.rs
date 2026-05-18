@@ -27,7 +27,9 @@ use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
 use crate::data::buffer::Buffer;
 use crate::data::file_tree::FileEntry;
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
-use crate::data::state::{EditorState, Mode, Selection};
+use crate::data::state::{
+    EditorState, Mode, Selection, TreeDeleteState, TreeNewFileState, TreeRenameState,
+};
 
 use super::chord_box;
 use super::editor_pane;
@@ -720,6 +722,8 @@ fn draw(
         let mut d = dialog;
         d.selected = dialog_state.selected;
         list_dialog::render(frame, &d);
+    } else if state.tree_delete_confirm.is_some() {
+        exit_modal::render_delete_confirm(frame, state);
     } else if state.pending_open_path.is_some() {
         exit_modal::render_open_modal(frame);
     } else if state.show_exit_modal {
@@ -756,7 +760,23 @@ fn handle_key(
         return false;
     }
 
-    // Priority 2b: Ctrl-O reloads file from disk when disk_changed is set
+    // Priority 3: Tree operation states (rename, delete, new file).
+    // These must run before the global Ctrl-T/S/Y/O shortcuts so those
+    // keys are absorbed mid-edit and op state is never left dangling.
+    if state.tree_rename_state.is_some() {
+        handle_tree_rename_input(state, code, modifiers, syntax_engine);
+        return false;
+    }
+    if state.tree_delete_confirm.is_some() {
+        handle_tree_delete_input(state, code);
+        return false;
+    }
+    if state.tree_new_file_state.is_some() {
+        handle_tree_new_file_input(state, code, modifiers, syntax_engine);
+        return false;
+    }
+
+    // Priority 4: Ctrl-O reloads file from disk when disk_changed is set
     if code == KeyCode::Char('o')
         && modifiers.contains(KeyModifiers::CONTROL)
         && state.current_buffer().is_some_and(|b| b.disk_changed)
@@ -765,13 +785,13 @@ fn handle_key(
         return false;
     }
 
-    // Priority 3: Ctrl-T always handled
+    // Priority 5: Ctrl-T always handled
     if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
         toggle_tree(state);
         return false;
     }
 
-    // Priority 3b: Ctrl-S always handled
+    // Priority 5b: Ctrl-S always handled
     if code == KeyCode::Char('s') && modifiers.contains(KeyModifiers::CONTROL) {
         let write_result = state
             .buffers
@@ -790,7 +810,7 @@ fn handle_key(
         return false;
     }
 
-    // Priority 3c: Ctrl-Y yanks the active selection to the clipboard.
+    // Priority 5c: Ctrl-Y yanks the active selection to the clipboard.
     // The selection is cleared after copying so the highlight and the
     // status-bar hint both disappear.
     if code == KeyCode::Char('y') && modifiers.contains(KeyModifiers::CONTROL) {
@@ -805,7 +825,7 @@ fn handle_key(
         return false;
     }
 
-    // Priority 4: Tree focus
+    // Priority 6: Tree focus
     if state.focus_tree {
         handle_tree_keys(state, code, modifiers, syntax_engine);
         return false;
@@ -931,6 +951,15 @@ fn handle_tree_keys(
             state.focus_tree = false;
             state.mode = Mode::Edit;
             state.status_msg = "-- EDIT --".into();
+        }
+        KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+            begin_tree_rename(state);
+        }
+        KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+            begin_tree_delete(state);
+        }
+        KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
+            begin_tree_new_file(state);
         }
         KeyCode::Up => {
             state.tree_selected = state.tree_selected.saturating_sub(1);
@@ -1557,6 +1586,359 @@ fn reload_buffer_from_disk(state: &mut EditorState, syntax_engine: &mut SyntaxEn
     }
 }
 
+// --- Tree rename ---
+
+fn begin_tree_rename(state: &mut EditorState) {
+    if let Some(entry) = state.tree_view.get(state.tree_selected) {
+        let name = entry.name().to_string();
+        let cursor = name.len();
+        state.tree_rename_state = Some(TreeRenameState {
+            index: state.tree_selected,
+            input: name,
+            cursor,
+        });
+    }
+}
+
+fn handle_tree_rename_input(
+    state: &mut EditorState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    syntax_engine: &mut SyntaxEngine,
+) {
+    match code {
+        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut r) = state.tree_rename_state {
+                r.input.insert(r.cursor, c);
+                r.cursor += c.len_utf8();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut r) = state.tree_rename_state
+                && r.cursor > 0
+            {
+                let prev = prev_char_boundary(&r.input, r.cursor);
+                r.input.drain(prev..r.cursor);
+                r.cursor = prev;
+            }
+        }
+        KeyCode::Left => {
+            if let Some(ref mut r) = state.tree_rename_state
+                && r.cursor > 0
+            {
+                r.cursor = prev_char_boundary(&r.input, r.cursor);
+            }
+        }
+        KeyCode::Right => {
+            if let Some(ref mut r) = state.tree_rename_state
+                && r.cursor < r.input.len()
+            {
+                r.cursor = next_char_boundary(&r.input, r.cursor);
+            }
+        }
+        KeyCode::Enter => {
+            commit_tree_rename(state, syntax_engine);
+        }
+        KeyCode::Esc => {
+            state.tree_rename_state = None;
+        }
+        _ => {}
+    }
+}
+
+fn commit_tree_rename(state: &mut EditorState, syntax_engine: &mut SyntaxEngine) {
+    let (index, new_name) = match state.tree_rename_state.as_ref() {
+        Some(r) => (r.index, r.input.trim().to_string()),
+        None => return,
+    };
+
+    if new_name.is_empty() {
+        state.status_msg = "rename failed: name cannot be empty".into();
+        return;
+    }
+    if new_name.contains('/') || new_name.contains('\\') {
+        state.status_msg = "rename failed: name cannot contain path separators".into();
+        return;
+    }
+
+    let old_path = match state.tree_view.get(index) {
+        Some(entry) => entry.path.clone(),
+        None => {
+            state.tree_rename_state = None;
+            return;
+        }
+    };
+
+    let new_path = match old_path.parent() {
+        Some(parent) => parent.join(&new_name),
+        None => {
+            state.tree_rename_state = None;
+            return;
+        }
+    };
+
+    // Unchanged name: clear state silently with no fs::rename and no error.
+    if new_path == old_path {
+        state.tree_rename_state = None;
+        return;
+    }
+
+    if new_path.exists() {
+        state.status_msg = "rename failed: destination exists".into();
+        return;
+    }
+
+    if let Err(e) = std::fs::rename(&old_path, &new_path) {
+        state.status_msg = format!("rename failed: {e}");
+        state.tree_rename_state = None;
+        return;
+    }
+
+    state.tree_rename_state = None;
+
+    if let Some(ref mut tree) = state.file_tree
+        && tree.root == old_path
+    {
+        tree.root = new_path.clone();
+    }
+
+    rename_subtree(&mut state.file_tree, &old_path, &new_path);
+    rename_in_tree_view(&mut state.tree_view, &old_path, &new_path);
+
+    for buf in &mut state.buffers {
+        if let Some(rebased) = rebase_path(&buf.path, &old_path, &new_path) {
+            buf.path = rebased;
+        }
+    }
+
+    if state
+        .current_buffer()
+        .is_some_and(|b| b.path.starts_with(&new_path))
+    {
+        refresh_buffer_caches(state, syntax_engine);
+    }
+
+    state.status_msg = format!("renamed → {new_name}");
+}
+
+// --- Tree delete ---
+
+fn begin_tree_delete(state: &mut EditorState) {
+    let entry = match state.tree_view.get(state.tree_selected) {
+        Some(e) => e,
+        None => return,
+    };
+
+    if entry.is_dir
+        && let Some(ref tree) = state.file_tree
+        && entry.path == tree.root
+    {
+        state.status_msg = "cannot delete tree root".into();
+        return;
+    }
+
+    let children_preview = if entry.is_dir {
+        if let Some(ref tree) = state.file_tree {
+            tree.entries
+                .iter()
+                .filter(|e| {
+                    e.depth == entry.depth + 1 && e.path.parent().is_some_and(|p| p == entry.path)
+                })
+                .map(|e| e.name().to_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    state.tree_delete_confirm = Some(TreeDeleteState {
+        index: state.tree_selected,
+        children_preview,
+    });
+}
+
+fn handle_tree_delete_input(state: &mut EditorState, code: KeyCode) {
+    match code {
+        KeyCode::Enter => {
+            commit_tree_delete(state);
+        }
+        KeyCode::Esc => {
+            state.tree_delete_confirm = None;
+        }
+        _ => {}
+    }
+}
+
+fn commit_tree_delete(state: &mut EditorState) {
+    let delete_state = match state.tree_delete_confirm.take() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let entry = match state.tree_view.get(delete_state.index) {
+        Some(e) => e.clone(),
+        None => return,
+    };
+
+    let result = if entry.is_dir {
+        std::fs::remove_dir_all(&entry.path)
+    } else {
+        std::fs::remove_file(&entry.path)
+    };
+
+    if let Err(e) = result {
+        state.status_msg = format!("delete failed: {e}");
+        return;
+    }
+
+    let deleted_path = entry.path.clone();
+    let deleted_name = entry.name().to_string();
+
+    if let Some(ref mut tree) = state.file_tree {
+        tree.entries.retain(|e| !e.path.starts_with(&deleted_path));
+    }
+    state
+        .tree_view
+        .retain(|e| !e.path.starts_with(&deleted_path));
+    state.tree_selected = state
+        .tree_selected
+        .min(state.tree_view.len().saturating_sub(1));
+
+    if state
+        .buffers
+        .iter()
+        .any(|b| b.path.starts_with(&deleted_path))
+    {
+        state.status_msg = format!("{deleted_name} deleted — Ctrl-S to restore");
+    } else {
+        state.status_msg = format!("deleted {deleted_name}");
+    }
+}
+
+// --- Tree new file ---
+
+fn begin_tree_new_file(state: &mut EditorState) {
+    let parent_dir = if state.tree_view.is_empty() {
+        state
+            .file_tree
+            .as_ref()
+            .map(|t| t.root.clone())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else if let Some(entry) = state.tree_view.get(state.tree_selected) {
+        if entry.is_dir {
+            entry.path.clone()
+        } else {
+            entry.path.parent().unwrap_or(Path::new(".")).to_path_buf()
+        }
+    } else {
+        PathBuf::from(".")
+    };
+
+    state.tree_new_file_state = Some(TreeNewFileState {
+        parent_dir,
+        input: String::new(),
+        cursor: 0,
+    });
+}
+
+fn handle_tree_new_file_input(
+    state: &mut EditorState,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    syntax_engine: &mut SyntaxEngine,
+) {
+    match code {
+        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut n) = state.tree_new_file_state {
+                n.input.insert(n.cursor, c);
+                n.cursor += c.len_utf8();
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut n) = state.tree_new_file_state
+                && n.cursor > 0
+            {
+                let prev = prev_char_boundary(&n.input, n.cursor);
+                n.input.drain(prev..n.cursor);
+                n.cursor = prev;
+            }
+        }
+        KeyCode::Left => {
+            if let Some(ref mut n) = state.tree_new_file_state
+                && n.cursor > 0
+            {
+                n.cursor = prev_char_boundary(&n.input, n.cursor);
+            }
+        }
+        KeyCode::Right => {
+            if let Some(ref mut n) = state.tree_new_file_state
+                && n.cursor < n.input.len()
+            {
+                n.cursor = next_char_boundary(&n.input, n.cursor);
+            }
+        }
+        KeyCode::Enter => {
+            commit_tree_new_file(state, syntax_engine);
+        }
+        KeyCode::Esc => {
+            state.tree_new_file_state = None;
+        }
+        _ => {}
+    }
+}
+
+fn commit_tree_new_file(state: &mut EditorState, syntax_engine: &mut SyntaxEngine) {
+    let new_file_state = match state.tree_new_file_state.as_ref() {
+        Some(n) => n,
+        None => return,
+    };
+
+    let name = new_file_state.input.trim().to_string();
+    if name.is_empty() {
+        state.status_msg = "filename cannot be empty".into();
+        return;
+    }
+    if name.contains('/') || name.contains('\\') {
+        state.status_msg = "filename cannot contain path separators".into();
+        return;
+    }
+
+    let new_path = new_file_state.parent_dir.join(&name);
+    if new_path.exists() {
+        state.status_msg = "file already exists".into();
+        return;
+    }
+
+    if let Err(e) = std::fs::File::create(&new_path) {
+        state.status_msg = format!("create failed: {e}");
+        state.tree_new_file_state = None;
+        return;
+    }
+
+    state.tree_new_file_state = None;
+
+    if let Some(ref mut tree) = state.file_tree
+        && let Some(new_entry) = insert_entry_sorted(tree, &new_path)
+    {
+        propagate_create_to_tree_view(state, &new_entry);
+        if let Some(idx) = state
+            .tree_view
+            .iter()
+            .position(|e| e.path == new_entry.path)
+        {
+            state.tree_selected = idx;
+        }
+    }
+
+    let _ = state.open_file(&new_path);
+    refresh_buffer_caches(state, syntax_engine);
+    state.focus_tree = false;
+    state.mode = Mode::Edit;
+    state.status_msg = "-- EDIT --".into();
+}
+
 fn toggle_tree(state: &mut EditorState) {
     if state.file_tree.is_some() {
         if state.focus_tree {
@@ -1576,11 +1958,10 @@ fn toggle_tree(state: &mut EditorState) {
         let dir = if state.opened_path.is_dir() {
             state.opened_path.clone()
         } else {
-            state
-                .opened_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf()
+            match state.opened_path.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+                _ => PathBuf::from("."),
+            }
         };
         match crate::data::file_tree::FileTree::from_dir(&dir) {
             Ok(tree) => {
@@ -1799,7 +2180,9 @@ mod tests {
     use crate::commands::lsp_engine::{LspEngine, LspEngineConfig};
     use crate::commands::syntax_engine::SyntaxEngine;
     use crate::data::lsp::types::SemanticToken;
-    use crate::data::state::{EditorState, Mode, Selection};
+    use crate::data::state::{
+        EditorState, Mode, Selection, TreeDeleteState, TreeNewFileState, TreeRenameState,
+    };
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn tok(line: usize, start_col: usize, length: usize, token_type: &str) -> SemanticToken {
@@ -2667,6 +3050,591 @@ mod tests {
             state.status_msg.starts_with("save failed:"),
             "failed save should surface error; got: {:?}",
             state.status_msg
+        );
+    }
+
+    // ── WI-0014 tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_tree_bare_filename_rooted_at_cwd() {
+        let mut state = EditorState::for_file(&PathBuf::from("notes.txt")).unwrap();
+        toggle_tree(&mut state);
+        assert!(
+            !state.status_msg.contains("tree error"),
+            "expected no error; got: {:?}",
+            state.status_msg
+        );
+        let tree = state
+            .file_tree
+            .expect("file_tree should be Some after toggle");
+        assert!(tree.root.is_absolute(), "root should be an absolute path");
+        assert!(tree.root.is_dir(), "root should be an existing directory");
+    }
+
+    #[test]
+    fn begin_tree_rename_sets_input_and_cursor_to_end() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("hello.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "hello.rs")
+            .expect("hello.rs should be in tree_view");
+        state.tree_selected = idx;
+
+        begin_tree_rename(&mut state);
+
+        let rs = state
+            .tree_rename_state
+            .as_ref()
+            .expect("tree_rename_state should be Some");
+        assert_eq!(rs.input, "hello.rs");
+        assert_eq!(rs.cursor, "hello.rs".len());
+    }
+
+    #[test]
+    fn commit_tree_rename_renames_file_on_disk_and_updates_tree_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("old.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "old.rs")
+            .expect("old.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "new.rs".to_string(),
+            cursor: 6,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        assert!(
+            !tmp.path().join("old.rs").exists(),
+            "old.rs should be gone from disk"
+        );
+        assert!(
+            tmp.path().join("new.rs").exists(),
+            "new.rs should exist on disk"
+        );
+        assert!(
+            state.tree_view.iter().any(|e| e.name() == "new.rs"),
+            "tree_view should contain new.rs"
+        );
+        assert!(
+            !state.tree_view.iter().any(|e| e.name() == "old.rs"),
+            "tree_view should not contain old.rs"
+        );
+    }
+
+    #[test]
+    fn commit_tree_rename_updates_open_buffer_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old_path = tmp.path().join("old.rs");
+        std::fs::write(&old_path, "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        state.open_file(&old_path).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "old.rs")
+            .expect("old.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "new.rs".to_string(),
+            cursor: 6,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        let new_path = tmp.path().join("new.rs");
+        // The buffer path must be canonicalized, so we canonicalize the expected path too.
+        let canonical_new = new_path.canonicalize().unwrap_or_else(|_| new_path.clone());
+        assert!(
+            state.buffers.iter().any(|b| b.path == canonical_new),
+            "a buffer should have the new path {:?}; buffers: {:?}",
+            canonical_new,
+            state.buffers.iter().map(|b| &b.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn commit_tree_rename_rejects_existing_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("old.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("new.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "old.rs")
+            .expect("old.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "new.rs".to_string(),
+            cursor: 6,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        assert!(
+            state.status_msg.contains("exists"),
+            "status_msg should mention 'exists'; got: {:?}",
+            state.status_msg
+        );
+        assert!(
+            tmp.path().join("old.rs").exists(),
+            "old.rs should remain on disk"
+        );
+        assert!(
+            state.tree_rename_state.is_some(),
+            "tree_rename_state should remain Some so the user can correct the name"
+        );
+    }
+
+    #[test]
+    fn commit_tree_rename_keeps_state_on_empty_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "file.rs")
+            .expect("file.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "   ".to_string(),
+            cursor: 3,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        assert!(
+            state.status_msg.contains("empty"),
+            "status_msg should mention empty; got: {:?}",
+            state.status_msg
+        );
+        assert!(
+            state.tree_rename_state.is_some(),
+            "tree_rename_state should remain Some so the user can correct the name"
+        );
+        assert!(tmp.path().join("file.rs").exists());
+    }
+
+    #[test]
+    fn commit_tree_rename_keeps_state_on_path_separator() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "file.rs")
+            .expect("file.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "sub/x.rs".to_string(),
+            cursor: 8,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        assert!(
+            state.status_msg.contains("path separators"),
+            "status_msg should mention path separators; got: {:?}",
+            state.status_msg
+        );
+        assert!(
+            state.tree_rename_state.is_some(),
+            "tree_rename_state should remain Some so the user can correct the name"
+        );
+        assert!(tmp.path().join("file.rs").exists());
+    }
+
+    #[test]
+    fn commit_tree_rename_unchanged_name_clears_state_silently() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "file.rs")
+            .expect("file.rs should be in tree_view");
+        state.tree_rename_state = Some(TreeRenameState {
+            index: idx,
+            input: "file.rs".to_string(),
+            cursor: 7,
+        });
+
+        commit_tree_rename(&mut state, &mut syntax);
+
+        assert!(
+            state.tree_rename_state.is_none(),
+            "tree_rename_state should be cleared on unchanged-name commit"
+        );
+        assert!(
+            !state.status_msg.contains("rename failed"),
+            "no error should be surfaced for an unchanged name; got: {:?}",
+            state.status_msg
+        );
+        assert!(tmp.path().join("file.rs").exists());
+    }
+
+    #[test]
+    fn begin_tree_delete_populates_children_preview_for_folder() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let subdir = tmp.path().join("mydir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("a.rs"), "").unwrap();
+        std::fs::write(subdir.join("b.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "mydir")
+            .expect("mydir should be in tree_view");
+        state.tree_selected = idx;
+
+        begin_tree_delete(&mut state);
+
+        let ds = state
+            .tree_delete_confirm
+            .as_ref()
+            .expect("tree_delete_confirm should be Some");
+        let names: Vec<&str> = ds.children_preview.iter().map(String::as_str).collect();
+        assert!(
+            names.contains(&"a.rs"),
+            "children_preview should contain a.rs; got: {names:?}"
+        );
+        assert!(
+            names.contains(&"b.rs"),
+            "children_preview should contain b.rs; got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn commit_tree_delete_removes_file_from_disk_and_tree_view() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("gone.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "gone.rs")
+            .expect("gone.rs should be in tree_view");
+        state.tree_selected = idx;
+        state.tree_delete_confirm = Some(TreeDeleteState {
+            index: idx,
+            children_preview: Vec::new(),
+        });
+
+        commit_tree_delete(&mut state);
+
+        assert!(
+            !tmp.path().join("gone.rs").exists(),
+            "gone.rs should be removed from disk"
+        );
+        assert!(
+            !state.tree_view.iter().any(|e| e.name() == "gone.rs"),
+            "tree_view should not contain gone.rs"
+        );
+    }
+
+    #[test]
+    fn commit_tree_delete_folder_removes_recursively() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let subdir = tmp.path().join("mydir");
+        std::fs::create_dir(&subdir).unwrap();
+        std::fs::write(subdir.join("inner.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "mydir")
+            .expect("mydir should be in tree_view");
+        state.tree_selected = idx;
+        state.tree_delete_confirm = Some(TreeDeleteState {
+            index: idx,
+            children_preview: vec!["inner.rs".to_string()],
+        });
+
+        commit_tree_delete(&mut state);
+
+        assert!(!subdir.exists(), "mydir should be removed from disk");
+        let tree = state.file_tree.as_ref().unwrap();
+        assert!(
+            !tree.entries.iter().any(|e| e.name() == "mydir"),
+            "file_tree.entries should not contain mydir"
+        );
+        assert!(
+            !tree.entries.iter().any(|e| e.name() == "inner.rs"),
+            "file_tree.entries should not contain inner.rs"
+        );
+    }
+
+    #[test]
+    fn commit_tree_delete_clamps_tree_selected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("aaa.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("bbb.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let last_idx = state.tree_view.len() - 1;
+        state.tree_selected = last_idx;
+        state.tree_delete_confirm = Some(TreeDeleteState {
+            index: last_idx,
+            children_preview: Vec::new(),
+        });
+
+        commit_tree_delete(&mut state);
+
+        let new_len = state.tree_view.len();
+        if new_len > 0 {
+            assert!(
+                state.tree_selected < new_len,
+                "tree_selected ({}) must be < new length ({})",
+                state.tree_selected,
+                new_len
+            );
+        } else {
+            assert_eq!(state.tree_selected, 0);
+        }
+    }
+
+    #[test]
+    fn begin_tree_delete_disallows_tree_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let root_path = state.file_tree.as_ref().unwrap().root.clone();
+        state.tree_view.insert(
+            0,
+            crate::data::file_tree::FileEntry {
+                path: root_path,
+                depth: 0,
+                is_dir: true,
+            },
+        );
+        state.tree_selected = 0;
+
+        begin_tree_delete(&mut state);
+
+        assert!(
+            state.tree_delete_confirm.is_none(),
+            "tree_delete_confirm should remain None for root"
+        );
+        assert!(
+            state.status_msg.contains("cannot delete tree root"),
+            "status_msg should mention 'cannot delete tree root'; got: {:?}",
+            state.status_msg
+        );
+    }
+
+    #[test]
+    fn begin_tree_new_file_on_file_entry_uses_parent_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "file.rs")
+            .expect("file.rs should be in tree_view");
+        state.tree_selected = idx;
+
+        begin_tree_new_file(&mut state);
+
+        let nfs = state
+            .tree_new_file_state
+            .as_ref()
+            .expect("tree_new_file_state should be Some");
+        let canonical_tmp = tmp.path().canonicalize().unwrap();
+        assert_eq!(
+            nfs.parent_dir, canonical_tmp,
+            "parent_dir should be the file's parent directory"
+        );
+    }
+
+    #[test]
+    fn begin_tree_new_file_on_folder_entry_uses_folder_itself() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let idx = state
+            .tree_view
+            .iter()
+            .position(|e| e.name() == "subdir")
+            .expect("subdir should be in tree_view");
+        state.tree_selected = idx;
+
+        begin_tree_new_file(&mut state);
+
+        let nfs = state
+            .tree_new_file_state
+            .as_ref()
+            .expect("tree_new_file_state should be Some");
+        let canonical_subdir = tmp.path().join("subdir").canonicalize().unwrap();
+        assert_eq!(
+            nfs.parent_dir, canonical_subdir,
+            "parent_dir should equal the folder's own path"
+        );
+    }
+
+    #[test]
+    fn commit_tree_new_file_creates_file_opens_buffer_and_sets_edit_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let root = state.file_tree.as_ref().unwrap().root.clone();
+        state.tree_new_file_state = Some(TreeNewFileState {
+            parent_dir: root,
+            input: "newfile.rs".to_string(),
+            cursor: 10,
+        });
+
+        commit_tree_new_file(&mut state, &mut syntax);
+
+        assert!(
+            tmp.path().join("newfile.rs").exists(),
+            "newfile.rs should exist on disk"
+        );
+        assert!(
+            state.tree_view.iter().any(|e| e.name() == "newfile.rs"),
+            "tree_view should contain newfile.rs"
+        );
+        assert_eq!(
+            state.mode,
+            Mode::Edit,
+            "mode should be Edit after creating a new file"
+        );
+    }
+
+    #[test]
+    fn commit_tree_new_file_rejects_existing_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("exists.rs"), "content").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let root = state.file_tree.as_ref().unwrap().root.clone();
+        state.tree_new_file_state = Some(TreeNewFileState {
+            parent_dir: root,
+            input: "exists.rs".to_string(),
+            cursor: 9,
+        });
+
+        commit_tree_new_file(&mut state, &mut syntax);
+
+        assert!(
+            state.status_msg.contains("already exists"),
+            "status_msg should contain 'already exists'; got: {:?}",
+            state.status_msg
+        );
+        assert!(
+            state.tree_new_file_state.is_some(),
+            "tree_new_file_state should remain Some so the user can correct the name"
+        );
+    }
+
+    #[test]
+    fn commit_tree_new_file_rejects_path_separators() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        let mut syntax = make_syntax();
+
+        let root = state.file_tree.as_ref().unwrap().root.clone();
+        state.tree_new_file_state = Some(TreeNewFileState {
+            parent_dir: root,
+            input: "sub/file.rs".to_string(),
+            cursor: 11,
+        });
+
+        commit_tree_new_file(&mut state, &mut syntax);
+
+        assert!(
+            !tmp.path().join("sub").exists(),
+            "no 'sub' directory should be created"
+        );
+        assert!(
+            !tmp.path().join("sub/file.rs").exists(),
+            "sub/file.rs should not be created"
+        );
+        assert!(
+            state.status_msg.contains("cannot contain path separators"),
+            "status_msg should mention path separators; got: {:?}",
+            state.status_msg
+        );
+    }
+
+    #[test]
+    fn ctrl_t_during_rename_is_absorbed_and_does_not_toggle_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("file.rs"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        // for_directory leaves focus_tree = true; capture starting tree state.
+        let had_tree_before = state.file_tree.is_some();
+        let focus_before = state.focus_tree;
+        state.tree_rename_state = Some(TreeRenameState {
+            index: 0,
+            input: "file.rs".to_string(),
+            cursor: 7,
+        });
+
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        let mut frontend = TuiFrontend::new();
+
+        let _ = handle_key(
+            &mut state,
+            &mut frontend,
+            &engine,
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+            &mut syntax,
+            &[],
+            80,
+        );
+
+        // Tree state must not toggle; rename state must survive as either
+        // unchanged or cleared (the Ctrl-T isn't a Char(c) under rename input
+        // because the modifier check excludes Control). Either way: no toggle.
+        assert_eq!(
+            state.file_tree.is_some(),
+            had_tree_before,
+            "file_tree presence must not change when Ctrl-T is pressed mid-rename"
+        );
+        assert_eq!(
+            state.focus_tree, focus_before,
+            "focus_tree must not toggle when Ctrl-T is pressed mid-rename"
         );
     }
 }

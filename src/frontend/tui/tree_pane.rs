@@ -63,30 +63,85 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
         .map(|sel| entry_display_width(sel).saturating_sub(inner_width))
         .unwrap_or(0);
 
-    let lines: Vec<Line> = state
-        .tree_view
-        .iter()
-        .enumerate()
-        .skip(v_scroll)
-        .take(inner_height)
-        .map(|(i, entry)| {
-            let indent = "  ".repeat(entry.depth);
-            let icon = if entry.is_dir {
-                let is_expanded = state
-                    .tree_view
-                    .get(i + 1)
-                    .map(|next| next.depth > entry.depth)
-                    .unwrap_or(false);
-                if is_expanded { "▾" } else { "▸" }
-            } else {
-                " "
-            };
-            let name = entry.name();
-            let display = format!("{indent}{icon} {name}");
+    let new_file_insert_after = state.tree_new_file_state.as_ref().and_then(|nf| {
+        let sel = state.tree_selected;
+        let entry = state.tree_view.get(sel)?;
+        if entry.is_dir && entry.path == nf.parent_dir {
+            let mut last = sel;
+            for j in (sel + 1)..state.tree_view.len() {
+                if state.tree_view[j].depth > entry.depth {
+                    last = j;
+                } else {
+                    break;
+                }
+            }
+            Some((last, entry.depth + 1))
+        } else {
+            let parent_depth = entry.depth;
+            Some((sel, parent_depth + 1))
+        }
+    });
 
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, entry) in state.tree_view.iter().enumerate().skip(v_scroll) {
+        if lines.len() >= inner_height {
+            break;
+        }
+
+        let indent = "  ".repeat(entry.depth);
+        let icon = if entry.is_dir {
+            let is_expanded = state
+                .tree_view
+                .get(i + 1)
+                .map(|next| next.depth > entry.depth)
+                .unwrap_or(false);
+            if is_expanded { "▾" } else { "▸" }
+        } else {
+            " "
+        };
+
+        let is_selected = i == state.tree_selected;
+        let is_renaming = state
+            .tree_rename_state
+            .as_ref()
+            .is_some_and(|r| r.index == i);
+
+        if is_renaming {
+            let r = state.tree_rename_state.as_ref().unwrap();
+            let display = format!("{indent}{icon} ");
             let scrolled: String = display.chars().skip(h_scroll).collect();
 
-            let is_selected = i == state.tree_selected;
+            let char_cursor = r.input[..r.cursor].chars().count();
+            let available = inner_width.saturating_sub(scrolled.chars().count());
+            let input_display: String = r.input.chars().take(available).collect();
+
+            let before: String = input_display.chars().take(char_cursor).collect();
+            let cursor_ch = input_display.chars().nth(char_cursor).unwrap_or(' ');
+            let after: String = input_display.chars().skip(char_cursor + 1).collect();
+
+            let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
+            let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+
+            let mut spans = vec![
+                Span::styled(scrolled, bg),
+                Span::styled(before, bg),
+                Span::styled(cursor_ch.to_string(), cursor_style),
+                Span::styled(after, bg),
+            ];
+
+            let used: usize = display.chars().skip(h_scroll).count()
+                + input_display.chars().count().max(char_cursor + 1);
+            if used < inner_width {
+                spans.push(Span::styled(" ".repeat(inner_width - used), bg));
+            }
+
+            lines.push(Line::from(spans));
+        } else {
+            let name = entry.name();
+            let display = format!("{indent}{icon} {name}");
+            let scrolled: String = display.chars().skip(h_scroll).collect();
+
             let style = if is_selected && state.focus_tree {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if entry.is_dir {
@@ -101,9 +156,66 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
                 scrolled
             };
 
-            Line::from(Span::styled(text, style))
-        })
-        .collect();
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+
+        if let Some((after_idx, depth)) = new_file_insert_after
+            && i == after_idx
+            && lines.len() < inner_height
+            && let Some(nf) = state.tree_new_file_state.as_ref()
+        {
+            let nf_indent = "  ".repeat(depth);
+            let prefix = format!("{nf_indent}\u{25CB} ");
+            let scrolled_prefix: String = prefix.chars().skip(h_scroll).collect();
+
+            let char_cursor = nf.input[..nf.cursor].chars().count();
+            let available = inner_width.saturating_sub(scrolled_prefix.chars().count());
+            let input_display: String = nf.input.chars().take(available).collect();
+
+            let before: String = input_display.chars().take(char_cursor).collect();
+            let cursor_ch = input_display.chars().nth(char_cursor).unwrap_or(' ');
+            let after: String = input_display.chars().skip(char_cursor + 1).collect();
+
+            let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
+            let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+
+            let mut spans = vec![
+                Span::styled(scrolled_prefix, bg),
+                Span::styled(before, bg),
+                Span::styled(cursor_ch.to_string(), cursor_style),
+                Span::styled(after, bg),
+            ];
+
+            let used: usize = prefix.chars().skip(h_scroll).count()
+                + input_display.chars().count().max(char_cursor + 1);
+            if used < inner_width {
+                spans.push(Span::styled(" ".repeat(inner_width - used), bg));
+            }
+
+            lines.push(Line::from(spans));
+        }
+    }
+
+    if let Some(nf) = state.tree_new_file_state.as_ref()
+        && lines.is_empty()
+    {
+        let prefix = "\u{25CB} ".to_string();
+        let char_cursor = nf.input[..nf.cursor].chars().count();
+        let available = inner_width.saturating_sub(prefix.chars().count());
+        let input_display: String = nf.input.chars().take(available).collect();
+        let before: String = input_display.chars().take(char_cursor).collect();
+        let cursor_ch = input_display.chars().nth(char_cursor).unwrap_or(' ');
+        let after: String = input_display.chars().skip(char_cursor + 1).collect();
+
+        let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
+        let cursor_style = Style::default().bg(Color::White).fg(Color::Black);
+        lines.push(Line::from(vec![
+            Span::styled(prefix, bg),
+            Span::styled(before, bg),
+            Span::styled(cursor_ch.to_string(), cursor_style),
+            Span::styled(after, bg),
+        ]));
+    }
 
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
@@ -246,6 +358,9 @@ mod tests {
             list_dialog: None,
             cached_token_count: 0,
             disk_changed_path: None,
+            tree_rename_state: None,
+            tree_delete_confirm: None,
+            tree_new_file_state: None,
         }
     }
 

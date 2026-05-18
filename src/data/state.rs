@@ -13,6 +13,26 @@ pub struct ListDialogState {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct TreeRenameState {
+    pub index: usize,
+    pub input: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeDeleteState {
+    pub index: usize,
+    pub children_preview: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TreeNewFileState {
+    pub parent_dir: PathBuf,
+    pub input: String,
+    pub cursor: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Edit,
@@ -76,6 +96,9 @@ pub struct EditorState {
     pub list_dialog: Option<ListDialogState>,
     pub cached_token_count: usize,
     pub disk_changed_path: Option<PathBuf>,
+    pub tree_rename_state: Option<TreeRenameState>,
+    pub tree_delete_confirm: Option<TreeDeleteState>,
+    pub tree_new_file_state: Option<TreeNewFileState>,
 }
 
 impl EditorState {
@@ -113,6 +136,9 @@ impl EditorState {
             list_dialog: None,
             cached_token_count: 0,
             disk_changed_path: None,
+            tree_rename_state: None,
+            tree_delete_confirm: None,
+            tree_new_file_state: None,
         })
     }
 
@@ -152,6 +178,9 @@ impl EditorState {
             list_dialog: None,
             cached_token_count: 0,
             disk_changed_path: None,
+            tree_rename_state: None,
+            tree_delete_confirm: None,
+            tree_new_file_state: None,
         })
     }
 
