@@ -44,10 +44,3 @@
 
 **What actually happened:** Given existing findings (Finding 2: `aals` appends to wrong location; Finding 3: `cifc` merges boundary lines; Finding 5: `aebs` drops leading blank line), confidence in a correct multi-line insertion was low. The builtin Edit tool was used instead. A possible correct approach would be `cels(target:N, value:-)` on the last `}` line, piping a value that replaces just that line with the full new block — but this has not been verified for very large multi-line stdin values.
 
-## Finding 7: `ane exec` does not work on markdown (.md) files
-
-**Action attempted:** `ane exec /workspace/aspec/work-items/0014-filetree-enhancements.md --chord "yebs"` to read an entire markdown file.
-
-**Expected outcome:** The entire file contents should be output to stdout, allowing ane to be used as a general-purpose text file reader for documentation and spec files.
-
-**What actually happened:** Exit code 1 with error `error: exec mode requires explicit parameters, e.g. yebs(fn_name, "body")`. This is because ane's chord system is designed for code files with language-aware scopes (Function, Variable, Struct, etc.) that depend on LSP integration. Markdown files lack a language server in ane's configuration, so LSP scopes fail. The Buffer scope (`yebs`) should theoretically work (Finding 1 documents that it requires a dummy parameter), but ane rejects it on non-code files. **Fallback used:** Builtin Read tool was used for all markdown file reads. This is acceptable since ane is a code editor, not a documentation viewer, but it means ane cannot be used for the full workflow when documentation files must be consulted.

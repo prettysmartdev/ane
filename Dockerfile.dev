@@ -28,7 +28,7 @@ USER amux
 # Install Rust via rustup (stable toolchain)
 ENV RUSTUP_HOME=/home/amux/.rustup \
     CARGO_HOME=/home/amux/.cargo \
-    PATH=/home/amux/.cargo/bin:$PATH
+    PATH=/home/amux/.cargo/bin:/home/amux/.local/bin:$PATH
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable --profile default && \
