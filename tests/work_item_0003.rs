@@ -504,7 +504,9 @@ fn stdin_multiline_value_replaces_single_line() {
         .expect("failed to spawn ane binary");
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(b"replaced first\nreplaced second\n").unwrap();
+        stdin
+            .write_all(b"replaced first\nreplaced second\n")
+            .unwrap();
     }
     let output = child.wait_with_output().expect("wait failed");
     assert!(

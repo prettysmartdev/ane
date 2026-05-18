@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
@@ -11,6 +12,8 @@ pub struct Buffer {
     /// `write()` can reproduce the file byte-for-byte and avoid spurious
     /// "no newline at end of file" diff noise.
     pub trailing_newline: bool,
+    pub last_disk_mtime: Option<SystemTime>,
+    pub disk_changed: bool,
 }
 
 impl Buffer {
@@ -22,11 +25,14 @@ impl Buffer {
         };
         let trailing_newline = content.ends_with('\n');
         let lines: Vec<String> = content.lines().map(String::from).collect();
+        let last_disk_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok(Self {
             path: path.to_path_buf(),
             lines,
             dirty: false,
             trailing_newline,
+            last_disk_mtime,
+            disk_changed: false,
         })
     }
 
@@ -36,6 +42,8 @@ impl Buffer {
             lines: vec![String::new()],
             dirty: false,
             trailing_newline: true,
+            last_disk_mtime: None,
+            disk_changed: false,
         }
     }
 
@@ -82,14 +90,19 @@ impl Buffer {
         }
     }
 
+    pub fn record_disk_mtime(&mut self) {
+        self.last_disk_mtime = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+    }
+
     pub fn write(&mut self) -> Result<()> {
-        // std::fs::write performs a single open(O_WRONLY|O_CREAT|O_TRUNC)+write
-        // so a mid-write failure can leave the file partially overwritten.
-        // Atomic replace would require a tempfile in the same directory.
         let content = self.content();
         std::fs::write(&self.path, content)
             .with_context(|| format!("writing {}", self.path.display()))?;
         self.dirty = false;
+        self.disk_changed = false;
+        self.record_disk_mtime();
         Ok(())
     }
 }
@@ -184,5 +197,40 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.starts_with("file is not valid UTF-8: "), "got: {msg}");
         assert!(msg.contains(&f.path().display().to_string()), "got: {msg}");
+    }
+
+    #[test]
+    fn record_disk_mtime_is_some_for_existing_file() {
+        let f = make_temp("content\n");
+        let mut buf = Buffer::empty(f.path());
+        buf.last_disk_mtime = None;
+        buf.record_disk_mtime();
+        assert!(buf.last_disk_mtime.is_some());
+    }
+
+    #[test]
+    fn record_disk_mtime_updates_to_newer_value_after_modification() {
+        let f = make_temp("initial\n");
+        let mut buf = Buffer::from_file(f.path()).unwrap();
+        assert!(buf.last_disk_mtime.is_some());
+        buf.last_disk_mtime = Some(std::time::SystemTime::UNIX_EPOCH);
+        std::fs::write(f.path(), b"modified\n").unwrap();
+        buf.record_disk_mtime();
+        assert!(
+            buf.last_disk_mtime > Some(std::time::SystemTime::UNIX_EPOCH),
+            "mtime should be newer than UNIX_EPOCH after modification"
+        );
+    }
+
+    #[test]
+    fn write_clears_disk_changed_flag() {
+        let f = make_temp("hello\n");
+        let mut buf = Buffer::from_file(f.path()).unwrap();
+        buf.disk_changed = true;
+        buf.dirty = true;
+        buf.set_line(0, "world".into());
+        buf.write().unwrap();
+        assert!(!buf.disk_changed, "write() must clear disk_changed");
+        assert!(!buf.dirty, "write() must clear dirty");
     }
 }

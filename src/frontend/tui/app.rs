@@ -19,16 +19,20 @@ use ratatui::{
     prelude::CrosstermBackend,
 };
 
+use notify::event::{EventKind, ModifyKind, RenameMode};
+
 use crate::commands::chord_engine::{ChordEngine, parens_balanced};
 use crate::commands::lsp_engine::{InstallProgress, LspEngine, LspEngineConfig};
 use crate::commands::syntax_engine::{SyntaxEngine, SyntaxFrontend};
 use crate::data::buffer::Buffer;
+use crate::data::file_tree::FileEntry;
 use crate::data::lsp::types::{InstallLine, Language, LspSharedState, SemanticToken, ServerState};
 use crate::data::state::{EditorState, Mode, Selection};
 
 use super::chord_box;
 use super::editor_pane;
 use super::exit_modal;
+use super::fs_watcher::FsWatcher;
 use super::list_dialog;
 use super::status_bar;
 use super::title_bar;
@@ -354,6 +358,17 @@ pub fn run(path: &Path) -> Result<()> {
     // Initial compute for the opened file
     refresh_buffer_caches(&mut state, &mut syntax_engine);
 
+    let mut fs_watcher = FsWatcher::new().ok();
+    if let Some(ref mut watcher) = fs_watcher {
+        if let Some(buf) = state.current_buffer_mut() {
+            buf.record_disk_mtime();
+            let _ = watcher.watch_file(&buf.path);
+        }
+        if let Some(tree) = &state.file_tree {
+            let _ = watcher.watch_tree(&tree.root);
+        }
+    }
+
     // Status polling thread — polls all server statuses
     {
         let poll_engine = Arc::clone(&engine);
@@ -377,6 +392,7 @@ pub fn run(path: &Path) -> Result<()> {
         &engine,
         &mut syntax_engine,
         &syntax_receiver,
+        &mut fs_watcher,
     );
 
     {
@@ -431,10 +447,19 @@ fn event_loop(
     engine: &Arc<Mutex<LspEngine>>,
     syntax_engine: &mut SyntaxEngine,
     syntax_receiver: &Arc<TuiSyntaxReceiver>,
+    fs_watcher: &mut Option<FsWatcher>,
 ) -> Result<()> {
     let mut prev_lsp_statuses: Vec<(Language, ServerState)> = Vec::new();
 
     loop {
+        if let Some(watcher) = fs_watcher.as_mut() {
+            while let Ok(event) = watcher.rx.try_recv() {
+                if let Ok(ev) = event {
+                    handle_fs_event(&ev, state, watcher);
+                }
+            }
+        }
+
         let lsp_statuses: Vec<(Language, ServerState)> = {
             let s = state.lsp_state.lock().unwrap();
             s.status.iter().map(|(l, s)| (*l, *s)).collect()
@@ -473,6 +498,10 @@ fn event_loop(
         let editor_area =
             compute_editor_render_area(state, Rect::new(0, 0, term_size.width, term_size.height));
 
+        let prev_active = state.active_buffer;
+        let prev_buf_path = state.current_buffer().map(|b| b.path.clone());
+        let had_tree = state.file_tree.is_some();
+
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
@@ -495,6 +524,27 @@ fn event_loop(
                     handle_mouse(state, mouse, editor_area);
                 }
                 _ => {}
+            }
+        }
+
+        if let Some(watcher) = fs_watcher.as_mut() {
+            let cur_buf_path = state.current_buffer().map(|b| b.path.clone());
+            if cur_buf_path != prev_buf_path || state.active_buffer != prev_active {
+                watcher.unwatch_file();
+                if let Some(buf) = state.current_buffer_mut() {
+                    buf.record_disk_mtime();
+                    let _ = watcher.watch_file(&buf.path);
+                }
+                state.disk_changed_path = None;
+            }
+
+            let has_tree = state.file_tree.is_some();
+            if has_tree && !had_tree {
+                if let Some(tree) = &state.file_tree {
+                    let _ = watcher.watch_tree(&tree.root);
+                }
+            } else if !has_tree && had_tree {
+                watcher.unwatch_tree();
             }
         }
     }
@@ -706,6 +756,15 @@ fn handle_key(
         return false;
     }
 
+    // Priority 2b: Ctrl-O reloads file from disk when disk_changed is set
+    if code == KeyCode::Char('o')
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && state.current_buffer().is_some_and(|b| b.disk_changed)
+    {
+        reload_buffer_from_disk(state, syntax_engine);
+        return false;
+    }
+
     // Priority 3: Ctrl-T always handled
     if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
         toggle_tree(state);
@@ -714,10 +773,20 @@ fn handle_key(
 
     // Priority 3b: Ctrl-S always handled
     if code == KeyCode::Char('s') && modifiers.contains(KeyModifiers::CONTROL) {
-        if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-            let _ = buf.write();
+        let write_result = state
+            .buffers
+            .get_mut(state.active_buffer)
+            .map(|buf| buf.write());
+        match write_result {
+            Some(Ok(())) => {
+                state.status_msg = "saved".into();
+                state.disk_changed_path = None;
+            }
+            Some(Err(e)) => {
+                state.status_msg = format!("save failed: {e}");
+            }
+            None => {}
         }
-        state.status_msg = "saved".into();
         return false;
     }
 
@@ -1194,6 +1263,298 @@ fn handle_edit_mode(
         _ => {}
     }
     modified
+}
+
+fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut FsWatcher) {
+    let watched_file = watcher.watched_file().map(|p| p.to_path_buf());
+
+    for path in &event.paths {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+
+        let is_watched_file = watched_file.as_ref().is_some_and(|wf| *wf == canonical);
+
+        if is_watched_file {
+            // Treat Name(From) and the [from, to] of Name(Both) as deletion of
+            // the active file. Some backends emit a single Name event instead
+            // of paired Remove+Create.
+            let is_rename_away = matches!(
+                event.kind,
+                EventKind::Modify(ModifyKind::Name(RenameMode::From | RenameMode::Both))
+            ) && watched_file.as_ref().is_some_and(|wf| {
+                event
+                    .paths
+                    .first()
+                    .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == *wf)
+                    .unwrap_or(false)
+            });
+            match event.kind {
+                EventKind::Modify(
+                    ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any,
+                ) => {
+                    if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                        let new_mtime =
+                            std::fs::metadata(&buf.path).and_then(|m| m.modified()).ok();
+                        if new_mtime != buf.last_disk_mtime {
+                            buf.disk_changed = true;
+                            let fname = buf
+                                .path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("file");
+                            state.disk_changed_path = Some(PathBuf::from(fname));
+                        }
+                    }
+                }
+                EventKind::Remove(_) => {
+                    handle_active_file_removed(state);
+                    watcher.unwatch_file();
+                }
+                EventKind::Modify(ModifyKind::Name(_)) if is_rename_away => {
+                    handle_active_file_removed(state);
+                    watcher.unwatch_file();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if state.file_tree.is_some() {
+        match event.kind {
+            EventKind::Create(_) | EventKind::Remove(_) => {
+                apply_tree_event(state, event);
+            }
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+                apply_tree_event(state, event);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn apply_tree_event(state: &mut EditorState, event: &notify::Event) {
+    match event.kind {
+        EventKind::Create(_) => {
+            for path in &event.paths {
+                let inserted = if let Some(tree) = &mut state.file_tree {
+                    insert_entry_sorted(tree, path)
+                } else {
+                    return;
+                };
+                if let Some(entry) = inserted {
+                    propagate_create_to_tree_view(state, &entry);
+                }
+            }
+        }
+        EventKind::Remove(_) => {
+            for path in &event.paths {
+                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+                if let Some(tree) = &mut state.file_tree {
+                    tree.entries
+                        .retain(|e| !e.path.starts_with(&canonical) && e.path != canonical);
+                }
+                state
+                    .tree_view
+                    .retain(|e| !e.path.starts_with(&canonical) && e.path != canonical);
+                handle_removed_path(state, &canonical);
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() >= 2 => {
+            let from = &event.paths[0];
+            let to = &event.paths[1];
+            let from_canonical = from.canonicalize().unwrap_or_else(|_| from.clone());
+            let to_canonical = to.canonicalize().unwrap_or_else(|_| to.clone());
+            rename_subtree(&mut state.file_tree, &from_canonical, &to_canonical);
+            rename_in_tree_view(&mut state.tree_view, &from_canonical, &to_canonical);
+        }
+        _ => {}
+    }
+}
+
+fn rename_subtree(tree_opt: &mut Option<crate::data::file_tree::FileTree>, from: &Path, to: &Path) {
+    let Some(tree) = tree_opt else { return };
+    for entry in &mut tree.entries {
+        if let Some(new_path) = rebase_path(&entry.path, from, to) {
+            entry.is_dir = new_path.is_dir();
+            entry.path = new_path;
+        }
+    }
+}
+
+fn rename_in_tree_view(tree_view: &mut [FileEntry], from: &Path, to: &Path) {
+    for entry in tree_view.iter_mut() {
+        if let Some(new_path) = rebase_path(&entry.path, from, to) {
+            entry.is_dir = new_path.is_dir();
+            entry.path = new_path;
+        }
+    }
+}
+
+/// If `path` is `from` or a descendant of `from`, return the equivalent path
+/// under `to`. Returns None when `path` is unrelated to `from`.
+fn rebase_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    if path == from {
+        return Some(to.to_path_buf());
+    }
+    path.strip_prefix(from).ok().map(|rel| to.join(rel))
+}
+
+fn handle_active_file_removed(state: &mut EditorState) {
+    if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+        buf.disk_changed = false;
+        let fname = buf
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        let msg = format!("{fname} deleted from disk. Ctrl-S to restore.");
+        if state.status_msg != msg {
+            state.status_msg = msg;
+        }
+        state.disk_changed_path = None;
+    }
+}
+
+fn propagate_create_to_tree_view(state: &mut EditorState, new_entry: &FileEntry) {
+    if state.tree_view.iter().any(|e| e.path == new_entry.path) {
+        return;
+    }
+
+    let depth = new_entry.depth;
+
+    // Depth 0: always visible — insert in sorted order among other depth-0 entries.
+    if depth == 0 {
+        let pos = state
+            .tree_view
+            .iter()
+            .position(|e| e.depth == 0 && e.path > new_entry.path)
+            .unwrap_or(state.tree_view.len());
+        state.tree_view.insert(pos, new_entry.clone());
+        return;
+    }
+
+    // Otherwise, the parent must be present in tree_view AND expanded
+    // (next entry has greater depth than parent).
+    let parent_path = match new_entry.path.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let parent_idx = match state.tree_view.iter().position(|e| e.path == parent_path) {
+        Some(idx) => idx,
+        None => return,
+    };
+    let parent_depth = state.tree_view[parent_idx].depth;
+    let parent_expanded = state
+        .tree_view
+        .get(parent_idx + 1)
+        .is_some_and(|next| next.depth > parent_depth);
+    if !parent_expanded {
+        return;
+    }
+
+    // Find the insertion point within the parent's direct children, in sorted order.
+    let child_depth = parent_depth + 1;
+    let mut insert_idx = parent_idx + 1;
+    while insert_idx < state.tree_view.len() {
+        let e = &state.tree_view[insert_idx];
+        if e.depth <= parent_depth {
+            break;
+        }
+        if e.depth == child_depth && e.path > new_entry.path {
+            break;
+        }
+        insert_idx += 1;
+    }
+    state.tree_view.insert(insert_idx, new_entry.clone());
+}
+
+fn insert_entry_sorted(
+    tree: &mut crate::data::file_tree::FileTree,
+    path: &Path,
+) -> Option<FileEntry> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !canonical.starts_with(&tree.root) {
+        return None;
+    }
+    if tree.entries.iter().any(|e| e.path == canonical) {
+        return None;
+    }
+    let depth = canonical
+        .strip_prefix(&tree.root)
+        .map(|rel| rel.components().count().saturating_sub(1))
+        .unwrap_or(0);
+    let is_dir = canonical.is_dir();
+    let entry = FileEntry {
+        path: canonical,
+        depth,
+        is_dir,
+    };
+    tree.entries.push(entry.clone());
+    tree.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(entry)
+}
+
+fn handle_removed_path(state: &mut EditorState, path: &Path) {
+    if let Some(buf) = state.current_buffer() {
+        let buf_canonical = buf.path.canonicalize().unwrap_or_else(|_| buf.path.clone());
+        if buf_canonical == path || buf.path == path {
+            let fname = buf
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
+            let msg = format!("{fname} deleted from disk. Ctrl-S to restore.");
+            if state.status_msg != msg {
+                state.status_msg = msg;
+            }
+        }
+    }
+    if !state.tree_view.is_empty() {
+        state.tree_selected = state
+            .tree_selected
+            .min(state.tree_view.len().saturating_sub(1));
+    } else if state
+        .file_tree
+        .as_ref()
+        .is_some_and(|t| t.entries.is_empty())
+    {
+        state.tree_selected = 0;
+        state.file_tree = None;
+    }
+}
+
+fn reload_buffer_from_disk(state: &mut EditorState, syntax_engine: &mut SyntaxEngine) {
+    let path = match state.current_buffer() {
+        Some(buf) => buf.path.clone(),
+        None => return,
+    };
+    match Buffer::from_file(&path) {
+        Ok(fresh) => {
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                *buf = fresh;
+            }
+            let line_count = state.current_buffer().map_or(0, |b| b.line_count());
+            if state.cursor_line >= line_count {
+                state.cursor_line = line_count.saturating_sub(1);
+            }
+            let line_len = state
+                .current_buffer()
+                .and_then(|b| b.lines.get(state.cursor_line))
+                .map_or(0, |l| l.len());
+            if state.cursor_col > line_len {
+                state.cursor_col = line_len;
+            }
+            if state.scroll_offset >= line_count {
+                state.scroll_offset = line_count.saturating_sub(1);
+            }
+            state.selection = None;
+            state.disk_changed_path = None;
+            state.status_msg = "reloaded from disk".into();
+            refresh_buffer_caches(state, syntax_engine);
+        }
+        Err(e) => {
+            state.status_msg = format!("reload failed: {e}");
+        }
+    }
 }
 
 fn toggle_tree(state: &mut EditorState) {
@@ -1940,6 +2301,372 @@ mod tests {
         assert!(
             state.cached_token_count > 0,
             "cached_token_count must be non-zero after refresh_buffer_caches"
+        );
+    }
+
+    // --- work item 0013: on-disk-updates ---
+
+    fn make_syntax() -> SyntaxEngine {
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        )
+    }
+
+    #[test]
+    fn handle_fs_event_sets_disk_changed_on_modify() {
+        use notify::event::{DataChange, ModifyKind as NModifyKind};
+        use std::time::SystemTime;
+
+        let (f, mut state) = make_state_with_lines(&["original"]);
+        state.buffers[0].last_disk_mtime = Some(SystemTime::UNIX_EPOCH);
+
+        let mut watcher = super::super::fs_watcher::FsWatcher::new().unwrap();
+        watcher.watch_file(f.path()).unwrap();
+        let canonical = f.path().canonicalize().unwrap();
+
+        let event = notify::Event::new(notify::EventKind::Modify(NModifyKind::Data(
+            DataChange::Content,
+        )))
+        .add_path(canonical);
+
+        handle_fs_event(&event, &mut state, &mut watcher);
+
+        assert!(
+            state.buffers[0].disk_changed,
+            "disk_changed must be set after a Modify event when mtime differs"
+        );
+    }
+
+    #[test]
+    fn reload_buffer_from_disk_updates_content_and_clears_flags() {
+        let (f, mut state) = make_state_with_lines(&["original line"]);
+        state.buffers[0].disk_changed = true;
+
+        std::fs::write(f.path(), "new content\nsecond line\n").unwrap();
+
+        let mut syntax = make_syntax();
+        reload_buffer_from_disk(&mut state, &mut syntax);
+
+        let buf = state.current_buffer().unwrap();
+        assert_eq!(
+            buf.lines,
+            vec!["new content", "second line"],
+            "reloaded buffer should reflect new file content"
+        );
+        assert!(!buf.dirty, "reloaded buffer must not be dirty");
+        assert!(
+            !buf.disk_changed,
+            "reloaded buffer must not have disk_changed set"
+        );
+        assert!(
+            state.status_msg.contains("reloaded"),
+            "status_msg should confirm reload; got: {:?}",
+            state.status_msg
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_insert_adds_entry_in_sorted_order() {
+        use notify::event::CreateKind;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("aaa.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("ccc.txt"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let new_file = tmp.path().join("bbb.txt");
+        std::fs::write(&new_file, "").unwrap();
+
+        let event =
+            notify::Event::new(notify::EventKind::Create(CreateKind::File)).add_path(new_file);
+        apply_tree_event(&mut state, &event);
+
+        let tree = state.file_tree.as_ref().unwrap();
+        let names: Vec<&str> = tree
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert!(
+            names.contains(&"bbb.txt"),
+            "new file should appear in tree.entries"
+        );
+        let a = names.iter().position(|&n| n == "aaa.txt").unwrap();
+        let b = names.iter().position(|&n| n == "bbb.txt").unwrap();
+        let c = names.iter().position(|&n| n == "ccc.txt").unwrap();
+        assert!(
+            a < b && b < c,
+            "entries should be sorted aaa < bbb < ccc; got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_remove_deletes_from_entries_and_tree_view() {
+        use notify::event::RemoveKind;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("keep.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("remove.txt"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let remove_path = state
+            .file_tree
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.path.file_name().is_some_and(|n| n == "remove.txt"))
+            .unwrap()
+            .path
+            .clone();
+
+        if !state.tree_view.iter().any(|e| e.path == remove_path) {
+            let entry = state
+                .file_tree
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .find(|e| e.path == remove_path)
+                .unwrap()
+                .clone();
+            state.tree_view.push(entry);
+        }
+
+        std::fs::remove_file(&remove_path).unwrap();
+
+        let event = notify::Event::new(notify::EventKind::Remove(RemoveKind::File))
+            .add_path(remove_path.clone());
+        apply_tree_event(&mut state, &event);
+
+        let tree = state.file_tree.as_ref().unwrap();
+        assert!(
+            !tree.entries.iter().any(|e| e.path == remove_path),
+            "removed file must not remain in tree.entries"
+        );
+        assert!(
+            !state.tree_view.iter().any(|e| e.path == remove_path),
+            "removed file must not remain in tree_view"
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_remove_clamps_tree_selected() {
+        use notify::event::RemoveKind;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("c.txt"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let initial_len = state.tree_view.len();
+        assert!(
+            initial_len >= 2,
+            "need at least 2 tree_view entries for clamping test"
+        );
+
+        state.tree_selected = initial_len - 1;
+        let last_path = state.tree_view[initial_len - 1].path.clone();
+
+        std::fs::remove_file(&last_path).ok();
+
+        let event =
+            notify::Event::new(notify::EventKind::Remove(RemoveKind::File)).add_path(last_path);
+        apply_tree_event(&mut state, &event);
+
+        let new_len = state.tree_view.len();
+        if new_len > 0 {
+            assert!(
+                state.tree_selected < new_len,
+                "tree_selected ({}) must be clamped below new tree_view length ({})",
+                state.tree_selected,
+                new_len
+            );
+        } else {
+            assert_eq!(
+                state.tree_selected, 0,
+                "tree_selected must be 0 when tree_view is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn handle_fs_event_remove_sets_status_msg_and_clears_disk_changed() {
+        use notify::event::RemoveKind;
+
+        let (f, mut state) = make_state_with_lines(&["content"]);
+        state.buffers[0].disk_changed = true;
+
+        let mut watcher = super::super::fs_watcher::FsWatcher::new().unwrap();
+        watcher.watch_file(f.path()).unwrap();
+        let canonical = f.path().canonicalize().unwrap();
+
+        let event =
+            notify::Event::new(notify::EventKind::Remove(RemoveKind::File)).add_path(canonical);
+        handle_fs_event(&event, &mut state, &mut watcher);
+
+        assert!(
+            state.status_msg.contains("deleted from disk"),
+            "status_msg should contain 'deleted from disk'; got: {:?}",
+            state.status_msg
+        );
+        assert!(
+            !state.buffers[0].disk_changed,
+            "disk_changed must be cleared after the file is removed"
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_create_inserts_into_tree_view_at_depth_zero() {
+        use notify::event::CreateKind;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("aaa.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("ccc.txt"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        let new_file = tmp.path().join("bbb.txt");
+        std::fs::write(&new_file, "").unwrap();
+
+        let event =
+            notify::Event::new(notify::EventKind::Create(CreateKind::File)).add_path(new_file);
+        apply_tree_event(&mut state, &event);
+
+        let names: Vec<&str> = state
+            .tree_view
+            .iter()
+            .map(|e| e.path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"bbb.txt"),
+            "new file should appear in tree_view (depth 0); got: {names:?}"
+        );
+        let a = names.iter().position(|&n| n == "aaa.txt").unwrap();
+        let b = names.iter().position(|&n| n == "bbb.txt").unwrap();
+        let c = names.iter().position(|&n| n == "ccc.txt").unwrap();
+        assert!(
+            a < b && b < c,
+            "tree_view should be sorted aaa < bbb < ccc; got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_create_skips_tree_view_when_parent_collapsed() {
+        use notify::event::CreateKind;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+        // sub is at depth 0 in tree_view, but its children are NOT yet inserted
+        // (no expand call), so a new child file should NOT appear in tree_view.
+
+        let new_file = tmp.path().join("sub/child.txt");
+        std::fs::write(&new_file, "").unwrap();
+
+        let event = notify::Event::new(notify::EventKind::Create(CreateKind::File))
+            .add_path(new_file.clone());
+        apply_tree_event(&mut state, &event);
+
+        let canonical_child = new_file.canonicalize().unwrap();
+        assert!(
+            state
+                .file_tree
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|e| e.path == canonical_child),
+            "new file should still appear in tree.entries"
+        );
+        assert!(
+            !state.tree_view.iter().any(|e| e.path == canonical_child),
+            "new file must NOT appear in tree_view while parent is collapsed"
+        );
+    }
+
+    #[test]
+    fn apply_tree_event_rename_dir_updates_child_paths() {
+        use notify::event::{ModifyKind as NModifyKind, RenameMode};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("old")).unwrap();
+        std::fs::write(tmp.path().join("old/inner.txt"), "").unwrap();
+        let mut state = EditorState::for_directory(tmp.path()).unwrap();
+
+        // Ensure tree_view has the inner entry as well, mimicking an expanded dir.
+        let old_dir_canonical = tmp.path().join("old").canonicalize().unwrap();
+        let inner_canonical = tmp.path().join("old/inner.txt").canonicalize().unwrap();
+        if !state.tree_view.iter().any(|e| e.path == inner_canonical) {
+            state.tree_view.push(FileEntry {
+                path: inner_canonical.clone(),
+                depth: 1,
+                is_dir: false,
+            });
+        }
+
+        std::fs::rename(tmp.path().join("old"), tmp.path().join("new")).unwrap();
+        let new_dir_canonical = tmp.path().join("new").canonicalize().unwrap();
+
+        let event = notify::Event::new(notify::EventKind::Modify(NModifyKind::Name(
+            RenameMode::Both,
+        )))
+        .add_path(old_dir_canonical)
+        .add_path(new_dir_canonical.clone());
+        apply_tree_event(&mut state, &event);
+
+        let expected_child = new_dir_canonical.join("inner.txt");
+        let tree = state.file_tree.as_ref().unwrap();
+        assert!(
+            tree.entries.iter().any(|e| e.path == expected_child),
+            "child path under renamed dir should be rewritten; entries: {:?}",
+            tree.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        assert!(
+            state.tree_view.iter().any(|e| e.path == expected_child),
+            "tree_view child path should be rewritten; got: {:?}",
+            state.tree_view.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ctrl_s_save_failure_surfaces_error_in_status_msg() {
+        // Make the buffer point at a path whose parent does not exist so the
+        // write call fails; assert the status message reports the failure.
+        let (_f, mut state) = make_state_with_lines(&["hello"]);
+        if let Some(buf) = state.current_buffer_mut() {
+            buf.path = std::path::PathBuf::from("/nonexistent-dir-9d3b/file.txt");
+            buf.dirty = true;
+        }
+
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let receiver = Arc::new(TuiSyntaxReceiver::new());
+        let mut syntax = SyntaxEngine::new(
+            Arc::clone(&engine),
+            Arc::clone(&receiver) as Arc<dyn SyntaxFrontend>,
+        );
+        let mut frontend = TuiFrontend::new();
+
+        let _ = handle_key(
+            &mut state,
+            &mut frontend,
+            &engine,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL,
+            &mut syntax,
+            &[],
+            80,
+        );
+
+        assert!(
+            state.status_msg.starts_with("save failed:"),
+            "failed save should surface error; got: {:?}",
+            state.status_msg
         );
     }
 }

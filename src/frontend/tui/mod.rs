@@ -2,6 +2,7 @@ pub mod app;
 pub mod chord_box;
 pub mod editor_pane;
 pub mod exit_modal;
+pub mod fs_watcher;
 pub mod list_dialog;
 pub mod status_bar;
 pub mod title_bar;

@@ -12,6 +12,8 @@ fn make_buffer(path: &str, content: &str) -> Buffer {
         lines: content.lines().map(String::from).collect(),
         dirty: false,
         trailing_newline: content.ends_with('\n'),
+        last_disk_mtime: None,
+        disk_changed: false,
     }
 }
 

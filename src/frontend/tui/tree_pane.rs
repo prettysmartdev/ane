@@ -245,6 +245,7 @@ mod tests {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            disk_changed_path: None,
         }
     }
 

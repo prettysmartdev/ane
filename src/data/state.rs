@@ -75,6 +75,7 @@ pub struct EditorState {
     pub selection: Option<Selection>,
     pub list_dialog: Option<ListDialogState>,
     pub cached_token_count: usize,
+    pub disk_changed_path: Option<PathBuf>,
 }
 
 impl EditorState {
@@ -111,6 +112,7 @@ impl EditorState {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            disk_changed_path: None,
         })
     }
 
@@ -149,6 +151,7 @@ impl EditorState {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            disk_changed_path: None,
         })
     }
 

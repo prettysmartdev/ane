@@ -259,6 +259,8 @@ mod tests {
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
             trailing_newline: false,
+            last_disk_mtime: None,
+            disk_changed: false,
         }
     }
 

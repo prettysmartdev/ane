@@ -2727,6 +2727,8 @@ mod tests {
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
             trailing_newline: false,
+            last_disk_mtime: None,
+            disk_changed: false,
         }
     }
 
@@ -2736,6 +2738,8 @@ mod tests {
             lines: lines.iter().map(|s| s.to_string()).collect(),
             dirty: false,
             trailing_newline: false,
+            last_disk_mtime: None,
+            disk_changed: false,
         }
     }
 
@@ -3023,6 +3027,8 @@ mod tests {
             lines: vec![],
             dirty: false,
             trailing_newline: false,
+            last_disk_mtime: None,
+            disk_changed: false,
         };
         let range = resolve_buffer_scope(&buffer).unwrap();
         assert_eq!(range.end_line, 0);
