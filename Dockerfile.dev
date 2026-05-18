@@ -17,10 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+RUN { id -u amux >/dev/null 2>&1 \
+       || useradd -m -s /bin/bash -d /home/amux amux 2>/dev/null \
+       || useradd -s /bin/bash -d /home/amux amux ; } \
+    && mkdir -p /workspace /home/amux \
+    && chown -R amux:amux /workspace /home/amux
+
+USER amux
+
 # Install Rust via rustup (stable toolchain)
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
+ENV RUSTUP_HOME=/home/amux/.rustup \
+    CARGO_HOME=/home/amux/.cargo \
+    PATH=/home/amux/.cargo/bin:$PATH
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable --profile default && \
