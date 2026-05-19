@@ -1,27 +1,12 @@
-# ane Findings
-
-## Finding 1: Buffer scope (`yebs`) requires a dummy parameter in exec mode
-
-**Action attempted:** `ane exec --chord "yebs" <file>` and `ane exec --chord "yebs()" <file>`
-
-**Expected outcome:** Read the entire file buffer without needing any target parameter, since buffer scope is whole-file and has no natural "target" symbol.
-
-**What actually happened:** Both forms exit with `error: exec mode requires explicit parameters, e.g. yebs(fn_name, "body")`. The workaround is `yebs(target:1)`, which succeeds and returns the full file contents. The error message is misleading — it implies a function name is needed, but buffer scope doesn't conceptually take one. The `target:1` value appears to be ignored for buffer scope but satisfies the parameter presence check.
-## Finding 2: `aals` appends to wrong location in large files
-
-**Action attempted:** `ane exec app.rs --chord "aals(target:1014, value:\"}\")"`  — intended to append a line after line 1014.
-
-**Expected outcome:** A new line containing `}` inserted immediately after line 1014.
-
-**What actually happened:** The new line was appended at the very end of the file (line 3033), not after line 1014. The `aals` chord with a line target appears to ignore the target line number and always appends at the end of the buffer.
-
-## Finding 3: `cifc` merges function boundary lines
+## Finding 3: `cifc` merges function boundary lines [RESOLVED]
 
 **Action attempted:** `cifc(target:handle_tree_keys, value:-)` to replace the contents of a function.
 
 **Expected outcome:** The function's opening `{` line and closing `}` line remain intact; only the body between them is replaced.
 
 **What actually happened:** The opening brace was merged with the first line of the new content (`{    match code {`), and the closing brace was merged with the last line of the match (`    }}`). The chord does not preserve line boundaries around the function body delimiters.
+
+**Resolution:** Fixed in `find_brace_range` — the WI-15 fix only excluded brace lines when `{` was the last char on the line and `}` was at column 0. Now checks whether the remainder after `{` or the prefix before `}` is whitespace-only, so indented closing braces (e.g. inside `impl` blocks) are properly excluded.
 ## Finding 4: `cifn` (ChangeInFunctionName) prepends `fn` to the replacement
 
 **Action attempted:** `cifn(target:centered_rect, value:"pub(super) fn centered_rect")` to change the function signature from `fn centered_rect` to `pub(super) fn centered_rect`.
@@ -44,3 +29,33 @@
 
 **What actually happened:** Given existing findings (Finding 2: `aals` appends to wrong location; Finding 3: `cifc` merges boundary lines; Finding 5: `aebs` drops leading blank line), confidence in a correct multi-line insertion was low. The builtin Edit tool was used instead. A possible correct approach would be `cels(target:N, value:-)` on the last `}` line, piping a value that replaces just that line with the full new block — but this has not been verified for very large multi-line stdin values.
 
+## Finding 7: `cifc` merges closing brace with last content line [RESOLVED]
+
+**Action attempted:** `cifc(target:open_file, value:-)` to replace the function body of `open_file` in `state.rs`.
+
+**Expected outcome:** The function body is replaced with the new content, preserving the closing `}` on its own line.
+
+**What actually happened:** The closing brace of the function was merged with the last line of the replacement content, producing `Ok(())}` instead of `Ok(())` followed by `}` on the next line. This is a variant of Finding 3 — `cifc` does not preserve line boundaries for the closing delimiter. Workaround: use builtin Edit to fix the formatting after `cifc`.
+
+**Resolution:** Same fix as Finding 3 — `find_brace_range` now uses whitespace-aware checks instead of exact column comparisons.
+## Finding 8: No chord for replacing a contiguous range of lines
+
+**Action attempted:** Needed to replace lines 394-401 in editor_pane.rs to restructure an if/else block (add a new branch to an existing conditional).
+
+**Expected outcome:** A chord like `rils(target:394-401, value:-)` or similar to replace a contiguous range of lines with new content from stdin.
+
+**What actually happened:** No such chord exists. The only options are `cels` (one line at a time) which can't add or remove lines from the range, or `cifc`/`cebs` which are too broad. For structural multi-line changes within a function that aren't a complete function rewrite, there's no suitable chord. Falling back to builtin Edit.
+## Finding 9: `yefs` cannot find struct definitions, only functions
+
+**Action attempted:** `yefs(target:EditorState)` to read the `EditorState` struct definition in `state.rs`.
+
+**Expected outcome:** The struct definition is returned, since `s` scope is Struct and `yefs` should yank the entire struct self.
+
+**What actually happened:** Error: `symbol 'EditorState' not found` — the available symbols list only contains function names. The LSP-backed symbol resolution does not include struct definitions for the `s` (Struct) scope.
+## Finding 10: Out-of-range lines produce errors but earlier lines in the batch still output
+
+**Action attempted:** Read lines 314-325 from a 323-line file using a for loop of `yels` calls.
+
+**Expected outcome:** Lines 314-323 are output successfully, and lines 324-325 produce errors.
+
+**What actually happened:** The successful outputs and error messages were intermixed on stdout/stderr. This is expected shell behavior, not an ane bug per se, but the mixed output can be confusing. The error messages are correctly informative ("line 323 out of range (file has 323 lines)").

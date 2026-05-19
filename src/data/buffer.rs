@@ -24,7 +24,10 @@ impl Buffer {
             Err(_) => anyhow::bail!("file is not valid UTF-8: {}", path.display()),
         };
         let trailing_newline = content.ends_with('\n');
-        let lines: Vec<String> = content.lines().map(String::from).collect();
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
         let last_disk_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok(Self {
             path: path.to_path_buf(),

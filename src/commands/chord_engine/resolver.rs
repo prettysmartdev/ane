@@ -69,12 +69,51 @@ fn resolve_buffer(
         };
     }
 
-    let replacement = query.args.value.clone();
+    let mut replacement = query.args.value.clone();
+
+    let is_interactive_cifc = query.action == Action::Change
+        && query.positional == Positional::Inside
+        && query.scope == Scope::Function
+        && query.component == Component::Contents
+        && replacement.is_none();
+
+    if is_interactive_cifc
+        && let Some(primary) = target_ranges.first()
+    {
+        let body_indent = buffer
+            .lines
+            .get(primary.start_line)
+            .map(|l| {
+                let ws: String = l.chars().take_while(|c| c.is_whitespace()).collect();
+                ws
+            })
+            .filter(|ws| !ws.is_empty());
+
+        let indent = body_indent.unwrap_or_else(|| {
+            let brace_indent: String = buffer
+                .lines
+                .get(primary.end_line + 1)
+                .map(|l| l.chars().take_while(|c| c.is_whitespace()).collect())
+                .unwrap_or_default();
+            format!("{brace_indent}    ")
+        });
+        replacement = Some(indent);
+    }
+
     let primary = target_ranges.first().copied().unwrap_or(TextRange::point(
         scope_range.start_line,
         scope_range.start_col,
     ));
-    let (cursor_destination, mode_after) = resolve_cursor_and_mode(query, &primary);
+    let (mut cursor_destination, mode_after) = resolve_cursor_and_mode(query, &primary);
+
+    if is_interactive_cifc
+        && let Some(ref repl) = replacement
+    {
+        cursor_destination = Some(CursorPosition {
+            line: primary.start_line,
+            col: repl.len(),
+        });
+    }
 
     Ok(BufferResolution {
         target_ranges,
@@ -1568,18 +1607,24 @@ fn find_brace_range(
 
     range = shrink_range(buffer, &range);
 
-    if range.start_col
-        >= buffer
-            .lines
-            .get(range.start_line)
-            .map(|l| line_char_count(l))
-            .unwrap_or(0)
-    {
+    let start_line_rest_is_blank = buffer
+        .lines
+        .get(range.start_line)
+        .map(|l| l.chars().skip(range.start_col).all(|c| c.is_whitespace()))
+        .unwrap_or(true);
+
+    if start_line_rest_is_blank && range.start_line < range.end_line {
         range.start_line += 1;
         range.start_col = 0;
     }
 
-    if range.end_col == 0 && range.end_line > range.start_line {
+    let end_line_prefix_is_blank = buffer
+        .lines
+        .get(range.end_line)
+        .map(|l| l.chars().take(range.end_col).all(|c| c.is_whitespace()))
+        .unwrap_or(true);
+
+    if end_line_prefix_is_blank && range.end_line > range.start_line {
         range.end_line -= 1;
         range.end_col = buffer
             .lines
@@ -6381,5 +6426,103 @@ mod tests {
         assert_eq!(target.start_col, 10);
         assert_eq!(target.end_line, 0);
         assert_eq!(target.end_col, 14);
+    }
+
+    #[test]
+    fn cifc_indented_closing_brace_excluded() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "impl Foo {",
+                "    fn bar() {",
+                "        let x = 1;",
+                "        x",
+                "    }",
+                "}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![sym("bar", SymbolKind::Function, 1, 4, 4, 5)]);
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("bar"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        assert_eq!(target.start_line, 2);
+        assert_eq!(target.start_col, 0);
+        assert_eq!(target.end_line, 3);
+        assert_eq!(target.end_col, 9);
+    }
+
+    #[test]
+    fn cifc_no_value_provides_indented_replacement_and_cursor() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &[
+                "impl Foo {",
+                "    fn bar() {",
+                "        let x = 1;",
+                "    }",
+                "}",
+            ],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![sym("bar", SymbolKind::Function, 1, 4, 3, 5)]);
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("bar"),
+            None,
+            None,
+        );
+        let mut q_no_value = q.clone();
+        q_no_value.args.value = None;
+        let resolved = resolve(&q_no_value, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement.as_deref(), Some("        "));
+        let cursor = res.cursor_destination.unwrap();
+        assert_eq!(cursor.line, 2);
+        assert_eq!(cursor.col, 8);
+    }
+
+    #[test]
+    fn cifc_no_value_top_level_fn_uses_four_spaces() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn main() {", "    println!(\"hi\");", "}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![sym("main", SymbolKind::Function, 0, 0, 2, 1)]);
+        let mut q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("main"),
+            None,
+            None,
+        );
+        q.args.value = None;
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement.as_deref(), Some("    "));
+        let cursor = res.cursor_destination.unwrap();
+        assert_eq!(cursor.line, 1);
+        assert_eq!(cursor.col, 4);
     }
 }

@@ -382,6 +382,7 @@ pub fn render(
             let text_width = (area.width as usize).saturating_sub(line_num_width + 1);
             let use_highlighting = !semantic_tokens.is_empty();
 
+            let is_empty_file = buf.line_count() == 1 && buf.lines[0].is_empty() && !buf.dirty;
             let mut visual_lines: Vec<Line> = Vec::new();
             let mut cursor_visual_row: Option<usize> = None;
             let mut cursor_visual_col: Option<usize> = None;
@@ -391,7 +392,10 @@ pub fn render(
                 let line_text = &buf.lines[logical_line];
                 let is_current = logical_line == state.cursor_line;
 
-                let num_style = if is_current && state.mode == Mode::Edit {
+                let gutter_bg = Style::default().bg(Color::Rgb(40, 40, 50));
+                let num_style = if is_empty_file {
+                    gutter_bg
+                } else if is_current && state.mode == Mode::Edit {
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
@@ -436,7 +440,9 @@ pub fn render(
                         break;
                     }
 
-                    let num_str = if wrap_idx == 0 {
+                    let num_str = if is_empty_file {
+                        " ".repeat(line_num_width + 1)
+                    } else if wrap_idx == 0 {
                         format!("{:>width$} ", logical_line, width = line_num_width)
                     } else {
                         " ".repeat(line_num_width + 1)
@@ -448,6 +454,14 @@ pub fn render(
                 }
 
                 logical_line += 1;
+            }
+
+            if is_empty_file {
+                let gutter_bg = Style::default().bg(Color::Rgb(40, 40, 50));
+                while visual_lines.len() < visible_height {
+                    let gutter_span = Span::styled(" ".repeat(line_num_width + 1), gutter_bg);
+                    visual_lines.push(Line::from(vec![gutter_span]));
+                }
             }
 
             let paragraph = Paragraph::new(visual_lines);

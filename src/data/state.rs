@@ -194,6 +194,16 @@ impl EditorState {
 
     pub fn open_file(&mut self, path: &Path) -> Result<()> {
         if let Some(idx) = self.buffers.iter().position(|b| b.path == path) {
+            if path.exists() {
+                if self.buffers[idx].dirty {
+                    let new_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                    if new_mtime != self.buffers[idx].last_disk_mtime {
+                        self.buffers[idx].disk_changed = true;
+                    }
+                } else if let Ok(fresh) = Buffer::from_file(path) {
+                    self.buffers[idx] = fresh;
+                }
+            }
             self.active_buffer = idx;
         } else {
             let buf = Buffer::from_file(path)?;
@@ -309,5 +319,64 @@ mod tests {
             head_col: 5,
         };
         assert_eq!(sel.ordered(), (3, 5, 3, 20));
+    }
+
+    #[test]
+    fn open_file_reloads_clean_buffer_from_disk() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "original").unwrap();
+
+        let mut state = EditorState::for_file(&path).unwrap();
+        assert_eq!(state.current_buffer().unwrap().content(), "original");
+
+        fs::write(&path, "updated").unwrap();
+        state.open_file(&path).unwrap();
+        assert_eq!(state.current_buffer().unwrap().content(), "updated");
+        assert!(!state.current_buffer().unwrap().dirty);
+    }
+
+    #[test]
+    fn open_file_sets_disk_changed_on_dirty_buffer_with_new_mtime() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "original").unwrap();
+
+        let mut state = EditorState::for_file(&path).unwrap();
+        state.buffers[0].dirty = true;
+
+        // Simulate external modification by writing new content (changes mtime)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&path, "external change").unwrap();
+
+        state.open_file(&path).unwrap();
+        assert!(
+            state.current_buffer().unwrap().disk_changed,
+            "disk_changed must be set when dirty buffer has stale mtime"
+        );
+        assert!(state.current_buffer().unwrap().dirty);
+        assert_eq!(
+            state.current_buffer().unwrap().content(),
+            "original",
+            "dirty buffer content should be preserved until user chooses"
+        );
+    }
+
+    #[test]
+    fn open_file_keeps_dirty_buffer_when_mtime_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.rs");
+        fs::write(&path, "original").unwrap();
+
+        let mut state = EditorState::for_file(&path).unwrap();
+        state.buffers[0].dirty = true;
+        state.buffers[0].lines[0] = "edited".to_string();
+
+        state.open_file(&path).unwrap();
+        assert!(
+            !state.current_buffer().unwrap().disk_changed,
+            "disk_changed must not be set when mtime has not changed"
+        );
+        assert_eq!(state.current_buffer().unwrap().content(), "edited");
     }
 }
