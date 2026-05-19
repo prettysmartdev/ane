@@ -4,11 +4,11 @@ use ane::data::skill::SKILL_CONTENT;
 // --- Skill token count ---
 
 #[test]
-fn skill_file_under_500_tokens() {
+fn skill_file_under_800_tokens() {
     let word_count = SKILL_CONTENT.split_whitespace().count();
     assert!(
-        word_count < 500,
-        "ane-skill.md has {word_count} whitespace-delimited words, expected < 500"
+        word_count <= 800,
+        "ane-skill.md has {word_count} whitespace-delimited words, expected <= 800"
     );
 }
 

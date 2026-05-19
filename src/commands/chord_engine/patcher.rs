@@ -7,7 +7,9 @@ use crate::data::buffer::Buffer;
 use crate::data::chord_types::Action;
 
 use super::errors::ChordError;
-use super::text::{apply_replacements, apply_single_replacement, extract_range_text};
+use super::text::{
+    apply_replacements, apply_single_replacement, extract_range_text, line_char_count,
+};
 use super::types::{
     BufferResolution, ChordAction, ChordQuery, DiffHunk, DiffLine, ResolvedChord, TextRange,
     UnifiedDiff,
@@ -119,7 +121,19 @@ fn build_action(
             let insertion = resolution.replacement.as_deref().unwrap_or("");
             let last = resolution.target_ranges.last().copied().unwrap();
             let point = TextRange::point(last.end_line, last.end_col);
-            apply_single_replacement(buffer, &point, insertion)
+            let line_len = buffer
+                .lines
+                .get(point.start_line)
+                .map(|l| line_char_count(l))
+                .unwrap_or(0);
+            let prefixed;
+            let effective = if point.start_col >= line_len && !insertion.starts_with('\n') {
+                prefixed = format!("\n{insertion}");
+                &prefixed
+            } else {
+                insertion
+            };
+            apply_single_replacement(buffer, &point, effective)
         }
         Action::Prepend => {
             let insertion = resolution.replacement.as_deref().unwrap_or("");
@@ -802,5 +816,81 @@ mod tests {
         );
         let diff = action.diff.as_ref().unwrap();
         assert!(diff.hunks.is_empty());
+    }
+
+    // Fix 5 — Append at end-of-line auto-prefixes newline
+
+    #[test]
+    fn append_at_line_end_auto_prefixes_newline() {
+        // Target is a point at the end of "hello" (col 5 = line length).
+        // Append should insert "world" on a new line, not concatenate inline.
+        let target = TextRange {
+            start_line: 0,
+            start_col: 5,
+            end_line: 0,
+            end_col: 5,
+        };
+        let action = run_patch(
+            Action::Append,
+            &["hello"],
+            target,
+            Some("world"),
+            None,
+            None,
+        );
+        let diff = action.diff.as_ref().unwrap();
+        assert!(
+            diff.modified.contains("hello\nworld"),
+            "expected 'hello\\nworld', got: {}",
+            diff.modified
+        );
+    }
+
+    #[test]
+    fn append_mid_line_no_auto_prefix() {
+        // Target ends at col 3 of "hello" (mid-line; 3 < 5 = line length).
+        // Append must NOT insert a newline — the content splices inline.
+        let target = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 3,
+        };
+        let action = run_patch(Action::Append, &["hello"], target, Some("!"), None, None);
+        let diff = action.diff.as_ref().unwrap();
+        assert!(
+            diff.modified.contains("hel!lo"),
+            "expected inline append 'hel!lo', got: {}",
+            diff.modified
+        );
+        assert!(
+            !diff.modified.contains("hel\n!lo"),
+            "mid-line append must not insert newline, got: {}",
+            diff.modified
+        );
+    }
+
+    #[test]
+    fn aebs_value_starts_on_new_line() {
+        // Simulate aebs: target = entire buffer range (0,0) to (0, line_len).
+        // Fix 5 ensures the appended value lands on a new line.
+        let target = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 5,
+        };
+        let action = run_patch(Action::Append, &["hello"], target, Some("new"), None, None);
+        let diff = action.diff.as_ref().unwrap();
+        assert!(
+            diff.modified.ends_with("hello\nnew"),
+            "appended value must start on a new line, got: {}",
+            diff.modified
+        );
+        assert!(
+            !diff.modified.contains("hellonew"),
+            "value must not be concatenated inline, got: {}",
+            diff.modified
+        );
     }
 }

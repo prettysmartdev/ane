@@ -74,13 +74,13 @@ fn full_pipeline_yank_line_captures_content() {
 #[test]
 fn full_pipeline_append_after_line_end() {
     let action = run(
-        r#"aale(target:0, value:" appended")"#,
+        r#"aale(target:0, value:"appended")"#,
         "/buf",
         "hello world\nline two",
     );
     let diff = action.diff.as_ref().unwrap();
     assert!(
-        diff.modified.contains("hello world appended"),
+        diff.modified.contains("hello world\nappended"),
         "got: {}",
         diff.modified
     );
@@ -145,11 +145,11 @@ fn round_trip_delete_clears_line_content() {
 }
 
 #[test]
-fn round_trip_append_increases_line_length() {
+fn round_trip_append_after_line_end_adds_new_line() {
     let original = "hello";
-    let action = run(r#"aale(target:0, value:" world")"#, "/buf", original);
+    let action = run(r#"aale(target:0, value:"world")"#, "/buf", original);
     let diff = action.diff.as_ref().unwrap();
-    assert_eq!(diff.modified.trim(), "hello world");
+    assert_eq!(diff.modified.trim(), "hello\nworld");
 }
 
 // --- Real Rust source file content ---
@@ -421,7 +421,7 @@ fn cifc_long_form_replaces_function_contents() {
 }
 
 #[test]
-fn cbfs_replaces_text_before_function() {
+fn cbfs_inserts_text_at_function_start() {
     let action = run_with_lsp(
         r#"cbfs(target:foo, value:"// header ")"#,
         "/test.rs",
@@ -435,12 +435,7 @@ fn cbfs_replaces_text_before_function() {
         diff.modified
     );
     assert!(
-        !diff.modified.contains("use std::io;"),
-        "got: {}",
-        diff.modified
-    );
-    assert!(
-        diff.modified.contains("fn foo() { 42 }"),
+        diff.modified.contains("// header fn foo() { 42 }"),
         "got: {}",
         diff.modified
     );

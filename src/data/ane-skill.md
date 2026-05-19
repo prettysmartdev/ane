@@ -64,6 +64,28 @@ ane exec f.rs --chord "cifn(target:getData, value:\"fetch\")"   # rename functio
 ane exec f.rs --chord "aals(target:10, value:\"new line\")"       # append after line 10
 ```
 
+## Component guide: Name vs Definition
+
+`n=Name` and `d=Definition` are frequently confused for Function scope:
+
+- **`n` (Name)** — the bare identifier only (`foo` in `fn foo()`). Use it to rename.
+- **`d` (Definition)** — the full declaration: visibility modifiers + `fn` + name + parameters + return type, but not the body. Use it to change visibility, add modifiers, or rewrite the signature.
+
+```
+# rename a function — Name component
+ane exec f.rs --chord "cifn(target:old_name, value:\"new_name\")"
+
+# add visibility or change signature — Definition component
+ane exec f.rs --chord "cefd(target:foo, value:\"pub(super) fn foo(x: i32) -> bool\")"
+```
+
+When unsure what a component covers, yank it first to inspect the range:
+
+```
+ane exec f.rs --chord "yefn(target:foo)"   # shows the identifier only
+ane exec f.rs --chord "yefd(target:foo)"   # shows the full declaration
+```
+
 ## Efficiency: use the narrowest scope
 
 Always use the narrowest scope that covers what you need. `yefc(target:main)` then `cifc(target:main, value:-)` is far more efficient than `yebs` then `cebs` — less output, fewer tokens, lower error risk. Use `yels` for one line, `yefc` for one function, `yebs` only when you truly need the whole file.

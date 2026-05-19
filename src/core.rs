@@ -41,7 +41,8 @@ Prefer the narrowest scope: yefc+cifc is far more efficient than yebs+cebs.\n\
 Edit examples:\n\
   cels(target:3) + value -> change line 3\n\
   dels(target:5) -> delete line 5\n\
-  cifn(target:getData) + value -> rename function\n\
+  cifn(target:getData) + value -> rename function (identifier only)\n\
+  cefd(target:handler) + value -> change full declaration incl. visibility\n\
   aale(target:10) + value -> append after line 10\n\
   rifc(target:handler) + value -> replace function contents";
 

@@ -15,4 +15,13 @@ mod tests {
         assert!(SKILL_CONTENT.contains("Action"), "missing 'Action'");
         assert!(SKILL_CONTENT.contains("Scope"), "missing 'Scope'");
     }
+
+    #[test]
+    fn skill_content_under_800_words() {
+        let word_count = SKILL_CONTENT.split_whitespace().count();
+        assert!(
+            word_count <= 800,
+            "SKILL_CONTENT has {word_count} words, expected <= 800"
+        );
+    }
 }

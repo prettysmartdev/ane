@@ -1106,35 +1106,29 @@ fn apply_positional(
         }
         Positional::Entire => Ok(vec![*component_range]),
         Positional::After => {
-            let (end_line, end_col) = if query.component == Component::Self_ {
-                let last = buffer.line_count().saturating_sub(1);
-                (
-                    last,
-                    buffer
-                        .lines
-                        .get(last)
-                        .map(|l| line_char_count(l))
-                        .unwrap_or(0),
-                )
-            } else {
-                (scope_range.end_line, scope_range.end_col)
-            };
+            if query.component == Component::Self_ {
+                return Ok(vec![TextRange::point(
+                    component_range.end_line,
+                    component_range.end_col,
+                )]);
+            }
             Ok(vec![TextRange {
                 start_line: component_range.end_line,
                 start_col: component_range.end_col,
-                end_line,
-                end_col,
+                end_line: scope_range.end_line,
+                end_col: scope_range.end_col,
             }])
         }
         Positional::Before => {
-            let (start_line, start_col) = if query.component == Component::Self_ {
-                (0, 0)
-            } else {
-                (scope_range.start_line, scope_range.start_col)
-            };
+            if query.component == Component::Self_ {
+                return Ok(vec![TextRange::point(
+                    component_range.start_line,
+                    component_range.start_col,
+                )]);
+            }
             Ok(vec![TextRange {
-                start_line,
-                start_col,
+                start_line: scope_range.start_line,
+                start_col: scope_range.start_col,
                 end_line: component_range.start_line,
                 end_col: component_range.start_col,
             }])
@@ -1569,11 +1563,32 @@ fn find_brace_range(
     scope_range: &TextRange,
     buffer_name: &str,
 ) -> Result<TextRange> {
-    if let Some(range) = scan_balanced(buffer, scope_range, '{', '}') {
-        Ok(range)
-    } else {
-        Err(ChordError::resolve(buffer_name, "no brace block found in scope").into())
+    let mut range = scan_balanced(buffer, scope_range, '{', '}')
+        .ok_or_else(|| ChordError::resolve(buffer_name, "no brace block found in scope"))?;
+
+    range = shrink_range(buffer, &range);
+
+    if range.start_col
+        >= buffer
+            .lines
+            .get(range.start_line)
+            .map(|l| line_char_count(l))
+            .unwrap_or(0)
+    {
+        range.start_line += 1;
+        range.start_col = 0;
     }
+
+    if range.end_col == 0 && range.end_line > range.start_line {
+        range.end_line -= 1;
+        range.end_col = buffer
+            .lines
+            .get(range.end_line)
+            .map(|l| line_char_count(l))
+            .unwrap_or(0);
+    }
+
+    Ok(range)
 }
 
 fn find_paren_range(
@@ -3047,8 +3062,8 @@ mod tests {
             end_col: 15,
         };
         let range = find_brace_range(&buffer, &scope, "/buf").unwrap();
-        assert_eq!(range.start_col, 9);
-        assert_eq!(range.end_col, 15);
+        assert_eq!(range.start_col, 10);
+        assert_eq!(range.end_col, 14);
     }
 
     #[test]
@@ -3061,10 +3076,10 @@ mod tests {
             end_col: 1,
         };
         let range = find_brace_range(&buffer, &scope, "/buf").unwrap();
-        assert_eq!(range.start_line, 0);
-        assert_eq!(range.start_col, 9);
-        assert_eq!(range.end_line, 2);
-        assert_eq!(range.end_col, 1);
+        assert_eq!(range.start_line, 1);
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_line, 1);
+        assert_eq!(range.end_col, 6);
     }
 
     #[test]
@@ -4028,11 +4043,11 @@ mod tests {
         let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
         let res = resolved.resolutions.get(path).unwrap();
         let target = res.target_ranges.first().unwrap();
-        // brace block: (0,9)..(2,1), inside shrinks to (0,10)..(2,0)
-        assert_eq!(target.start_line, 0);
-        assert_eq!(target.start_col, 10);
-        assert_eq!(target.end_line, 2);
-        assert_eq!(target.end_col, 0);
+        // brace block shrinks past delimiters and newlines to body lines only
+        assert_eq!(target.start_line, 1);
+        assert_eq!(target.start_col, 0);
+        assert_eq!(target.end_line, 1);
+        assert_eq!(target.end_col, 6);
     }
 
     // --- cbfs: ChangeBeforeFunctionSelf ---
@@ -4058,8 +4073,8 @@ mod tests {
         let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
         let res = resolved.resolutions.get(path).unwrap();
         let target = res.target_ranges.first().unwrap();
-        // Before Self_ uses buffer start (0,0) to function start (2,0)
-        assert_eq!(target.start_line, 0);
+        // Before Self_ returns a point at function start (2,0)
+        assert_eq!(target.start_line, 2);
         assert_eq!(target.start_col, 0);
         assert_eq!(target.end_line, 2);
         assert_eq!(target.end_col, 0);
@@ -4092,10 +4107,10 @@ mod tests {
         let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
         let res = resolved.resolutions.get(path).unwrap();
         let target = res.target_ranges.first().unwrap();
-        // After Self_ uses function end (0,11) to buffer end (2,11)
+        // After Self_ returns a point at function end (0,11)
         assert_eq!(target.start_line, 0);
         assert_eq!(target.start_col, 11);
-        assert_eq!(target.end_line, 2);
+        assert_eq!(target.end_line, 0);
         assert_eq!(target.end_col, 11);
     }
 
@@ -6241,5 +6256,130 @@ mod tests {
             res.warnings.is_empty(),
             "no warning when count matches exactly"
         );
+    }
+
+    // Fix 2 — apply_positional After+Self_ returns a point at end-of-component
+
+    #[test]
+    fn append_after_line_self_inserts_at_line_end() {
+        // Before Fix 2, After+Self_ would span from component end to buffer tail.
+        // After Fix 2 it returns a zero-length point at component_range.end.
+        let buffer = buf(&["line0", "line1", "line2", "line3", "line4"]);
+        let comp = TextRange {
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 5,
+        };
+        let scope = comp;
+        let q = query(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(2),
+            None,
+        );
+        let result = apply_positional(&q, &buffer, &scope, &comp, "/buf").unwrap();
+        assert_eq!(result.len(), 1);
+        let r = result[0];
+        assert_eq!(
+            r.start_line, 1,
+            "point must be on the target line, not buffer tail"
+        );
+        assert_eq!(r.start_col, 5);
+        assert_eq!(r.end_line, 1);
+        assert_eq!(r.end_col, 5);
+    }
+
+    #[test]
+    fn prepend_before_line_self_inserts_at_line_start() {
+        // Before Fix 2, Before+Self_ would span from buffer start to component start.
+        // After Fix 2 it returns a zero-length point at component_range.start.
+        let buffer = buf(&["line0", "line1", "line2", "line3", "line4"]);
+        let comp = TextRange {
+            start_line: 2,
+            start_col: 0,
+            end_line: 2,
+            end_col: 5,
+        };
+        let scope = comp;
+        let q = query(
+            Action::Prepend,
+            Positional::Before,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(3),
+            None,
+        );
+        let result = apply_positional(&q, &buffer, &scope, &comp, "/buf").unwrap();
+        assert_eq!(result.len(), 1);
+        let r = result[0];
+        assert_eq!(
+            r.start_line, 2,
+            "point must be on the target line, not buffer start"
+        );
+        assert_eq!(r.start_col, 0);
+        assert_eq!(r.end_line, 2);
+        assert_eq!(r.end_col, 0);
+    }
+
+    // Fix 3 — find_brace_range advances past opening-brace newline and retreats
+    // before closing-brace newline so cifc replacement leaves both brace lines intact.
+
+    #[test]
+    fn cifc_multiline_preserves_brace_lines() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn foo() {", "    let x = 1;", "    x", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![sym("foo", SymbolKind::Function, 0, 0, 3, 1)]);
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("foo"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        // Range must start on line 1 (body start) and end on line 2 (body end).
+        // Lines 0 ("{") and 3 ("}") must not be touched.
+        assert_eq!(target.start_line, 1);
+        assert_eq!(target.start_col, 0);
+        assert_eq!(target.end_line, 2);
+        assert_eq!(target.end_col, 5);
+    }
+
+    #[test]
+    fn cifc_single_line_unchanged() {
+        // Single-line function: "fn bar() { 99 }" — Fix 3 newline-advance logic
+        // must not trigger; the brace content range stays on the same line.
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["fn bar() { 99 }"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = mock_lsp(path, vec![sym("bar", SymbolKind::Function, 0, 0, 0, 15)]);
+        let q = query(
+            Action::Change,
+            Positional::Inside,
+            Scope::Function,
+            Component::Contents,
+            Some("bar"),
+            None,
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        let target = res.target_ranges.first().unwrap();
+        assert_eq!(target.start_line, 0);
+        assert_eq!(target.start_col, 10);
+        assert_eq!(target.end_line, 0);
+        assert_eq!(target.end_col, 14);
     }
 }

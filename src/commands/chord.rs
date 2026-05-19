@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::data::buffer::Buffer;
-use crate::data::chord_types::Action;
+use crate::data::chord_types::{Action, Scope};
 use crate::data::lsp::registry;
 use crate::data::lsp::types::ServerState;
 
@@ -77,11 +77,32 @@ pub fn execute_chord(
     let mut chord = chord.clone();
     resolve_stdin_sentinels(&mut chord)?;
 
-    if args_are_empty(&chord.args) && chord.action != Action::List {
+    if args_are_empty(&chord.args) && chord.action != Action::List && chord.scope != Scope::Buffer {
         bail!(
             "exec mode requires explicit parameters, e.g. {}(fn_name, \"body\")",
             chord.short_form()
         );
+    }
+
+    if !frontend.is_interactive() {
+        match chord.action {
+            Action::Change if chord.args.value.is_none() => {
+                bail!(
+                    "{} requires an explicit value: pass value:\"...\" (or value:- for stdin); use value:\"\" to clear intentionally",
+                    chord.short_form()
+                );
+            }
+            Action::Replace
+                if chord.args.value.is_none()
+                    && !(chord.args.find.is_some() && chord.args.replace.is_some()) =>
+            {
+                bail!(
+                    "{} requires either value:\"...\" or both find:\"...\" and replace:\"...\"",
+                    chord.short_form()
+                );
+            }
+            _ => {}
+        }
     }
 
     if chord.requires_lsp {
@@ -316,6 +337,20 @@ mod tests {
             msg.contains("exec mode requires explicit parameters"),
             "got: {msg}"
         );
+
+        // Fix 1: Buffer-scope chords are exempt — no target is meaningful for a whole-file operation.
+        let chord_yebs = parse_chord("yebs").unwrap();
+        let result = execute_chord(
+            &HeadlessContext,
+            f_rs.path(),
+            &chord_yebs,
+            &mut default_engine(),
+        );
+        assert!(
+            result.is_ok(),
+            "yebs with no args must not raise the explicit-params error; got: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -342,6 +377,7 @@ mod tests {
 
         let mut chord = parse_chord("cifc").unwrap();
         chord.args.target_name = Some("some_fn".to_string());
+        chord.args.value = Some("body".to_string());
 
         let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
         assert!(result.is_err());
@@ -495,6 +531,190 @@ mod tests {
         assert!(
             !msg.contains("file not found"),
             "file-not-found must not fire before interactive check, got: {msg}"
+        );
+    }
+
+    // Fix 1 — Buffer-scope chords succeed with no args
+
+    #[test]
+    fn execute_yank_entire_buffer_no_args_succeeds() {
+        let f = temp_file("line one\nline two\n");
+        let chord = parse_chord("yebs").unwrap(); // no target, no value
+        let result =
+            execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine()).unwrap();
+        assert_eq!(
+            result.yanked.as_deref(),
+            Some("line one\nline two"),
+            "yebs must return full file content"
+        );
+    }
+
+    // Fix 2 — aals inserts content immediately after the specified line
+
+    #[test]
+    fn execute_append_after_line_inserts_at_correct_position() {
+        // 5-line file; target_line = 2 (0-based) = "ccc".
+        // Inserted line must appear right after "ccc", not at EOF.
+        let f = temp_file("aaa\nbbb\nccc\nddd\neee\n");
+        let mut chord = parse_chord("aals").unwrap();
+        chord.args.target_line = Some(2); // 0-based index 2 = "ccc"
+        chord.args.value = Some("xxx".to_string());
+        let result =
+            execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine()).unwrap();
+        let lines: Vec<&str> = result.modified.lines().collect();
+        let ccc_idx = lines.iter().position(|l| *l == "ccc").expect("ccc present");
+        let xxx_idx = lines.iter().position(|l| *l == "xxx").expect("xxx present");
+        let ddd_idx = lines.iter().position(|l| *l == "ddd").expect("ddd present");
+        assert_eq!(
+            xxx_idx,
+            ccc_idx + 1,
+            "inserted line must immediately follow the target line"
+        );
+        assert!(
+            ddd_idx > xxx_idx,
+            "original line after target must come after the inserted line"
+        );
+        assert!(
+            xxx_idx < lines.len() - 1,
+            "inserted line must not be at EOF"
+        );
+    }
+
+    // Fix 5 — aebs appends on a genuinely new line
+
+    #[test]
+    fn execute_aebs_appends_on_new_line() {
+        let f = temp_file("existing\n");
+        let mut chord = parse_chord("aebs").unwrap();
+        chord.args.value = Some("appended".to_string());
+        let result =
+            execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine()).unwrap();
+        let lines: Vec<&str> = result.modified.lines().collect();
+        assert!(
+            lines.contains(&"existing"),
+            "original content must be preserved"
+        );
+        assert_eq!(
+            lines.last().copied(),
+            Some("appended"),
+            "appended value must appear as a separate last line"
+        );
+        assert!(
+            !result.modified.contains("existingappended"),
+            "value must not be concatenated inline"
+        );
+    }
+
+    // CLI value-required guard: Change/Replace must carry an explicit value
+    // when the frontend is non-interactive, so chords like `cebs` and `rebs`
+    // cannot silently clear a file.
+
+    #[test]
+    fn cebs_without_value_errors_and_preserves_file() {
+        let f = temp_file("keep me\n");
+        let chord = parse_chord("cebs").unwrap();
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
+        assert!(result.is_err(), "cebs with no value must fail on CLI");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("requires an explicit value"),
+            "expected explicit-value error, got: {msg}"
+        );
+        let on_disk = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(on_disk, "keep me\n", "file must be untouched after error");
+    }
+
+    #[test]
+    fn rebs_without_value_or_find_replace_errors() {
+        let f = temp_file("keep me\n");
+        let chord = parse_chord("rebs").unwrap();
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
+        assert!(result.is_err(), "rebs with no args must fail on CLI");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("requires either value") && msg.contains("find"),
+            "expected value-or-find-replace error, got: {msg}"
+        );
+        let on_disk = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(on_disk, "keep me\n", "file must be untouched after error");
+    }
+
+    #[test]
+    fn cebs_with_explicit_empty_value_succeeds() {
+        let f = temp_file("clear me\n");
+        let mut chord = parse_chord("cebs").unwrap();
+        chord.args.value = Some(String::new());
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
+        assert!(
+            result.is_ok(),
+            "explicit value:\"\" is the documented escape hatch for intentional clear; got: {:?}",
+            result.err()
+        );
+        let on_disk = std::fs::read_to_string(f.path()).unwrap();
+        assert!(
+            on_disk.trim().is_empty(),
+            "file content must be cleared when value:\"\" is explicit; got: {on_disk:?}"
+        );
+        assert!(
+            !on_disk.contains("clear me"),
+            "original content must be gone; got: {on_disk:?}"
+        );
+    }
+
+    #[test]
+    fn rebs_with_find_and_replace_succeeds() {
+        let f = temp_file("hello world\n");
+        let mut chord = parse_chord("rebs").unwrap();
+        chord.args.find = Some("hello".to_string());
+        chord.args.replace = Some("goodbye".to_string());
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
+        assert!(
+            result.is_ok(),
+            "rebs with find+replace pair must succeed without value; got: {:?}",
+            result.err()
+        );
+        let on_disk = std::fs::read_to_string(f.path()).unwrap();
+        assert!(
+            on_disk.contains("goodbye"),
+            "find/replace must apply; got: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn change_line_without_value_errors() {
+        let f = temp_file("first\nsecond\n");
+        let mut chord = parse_chord("cels").unwrap();
+        chord.args.target_line = Some(0);
+        let result = execute_chord(&HeadlessContext, f.path(), &chord, &mut default_engine());
+        assert!(
+            result.is_err(),
+            "cels with target but no value must fail on CLI"
+        );
+        let on_disk = std::fs::read_to_string(f.path()).unwrap();
+        assert_eq!(
+            on_disk, "first\nsecond\n",
+            "file must be untouched after error"
+        );
+    }
+
+    #[test]
+    fn change_value_required_guard_skipped_when_frontend_is_interactive() {
+        struct InteractiveContext;
+        impl FrontendCapabilities for InteractiveContext {
+            fn is_interactive(&self) -> bool {
+                true
+            }
+        }
+        let f = temp_file("first\nsecond\n");
+        let mut chord = parse_chord("cels").unwrap();
+        chord.args.target_line = Some(0);
+        // In the interactive (TUI) path, missing value is valid — the frontend
+        // would enter interactive edit mode. The guard must not fire.
+        let result = execute_chord(&InteractiveContext, f.path(), &chord, &mut default_engine());
+        assert!(
+            result.is_ok(),
+            "interactive frontend must bypass the value-required guard; got: {:?}",
+            result.err()
         );
     }
 }
