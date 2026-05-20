@@ -34,8 +34,8 @@ The action determines what happens to the resolved text range.
 | `d` | Delete | Remove the target range (replace with empty string). |
 | `r` | Replace | If `find` and `replace` args are given, performs find-and-replace within the target. Otherwise behaves like Change. |
 | `y` | Yank | Copy the target range text. Produces no diff. |
-| `a` | Append | Insert `value` immediately **after** the end of the target range. |
-| `p` | Prepend | Insert `value` immediately **before** the start of the target range. |
+| `a` | Append | Insert `value` after the target range. For Line scope: `After` positional inserts on a **new line** after the target; `Entire` positional appends **inline** at the end of the target line. |
+| `p` | Prepend | Insert `value` before the target range. For Line scope: `Before` positional inserts on a **new line** before the target; `Entire` positional prepends **inline** at the start of the target line. |
 | `i` | Insert | Insert `value` at the cursor position (falls back to target start if no cursor). |
 | `j` | Jump | Move the cursor to the target position. TUI-only -- the CLI rejects Jump chords. Produces no diff. |
 | `l` | List | Collect all matching items as a list. In the TUI, shows a scrollable overlay where you can navigate with arrow keys and press Enter to jump to the selected item. In the CLI, prints each item with its line and column number. Produces no diff. |

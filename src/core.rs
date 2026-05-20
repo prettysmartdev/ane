@@ -33,18 +33,21 @@ Component:  b=Beginning c=Contents e=End v=Value p=Parameters a=Arguments n=Name
 Args in parens: chord(target:name_or_line_number)\n\
 Use the value parameter (not inline) for replacement text.\n\
 \n\
-Read files (Yank): yebs -> entire file, yels(target:5) -> line 5, yefc(target:main) -> function body\n\
-Explore code (List): lefd -> list functions, levd -> list variables, lesd -> list structs\n\
+Discover first: lefd -> list function signatures, lefn -> list function names.\n\
+Read narrow: yefc(target:main) -> function body, yels(target:5) -> one line. Avoid yebs unless you need the whole file.\n\
+Edit narrow: cifc(target:fn, value:-) -> replace one function body. Avoid cebs.\n\
 \n\
-Prefer the narrowest scope: yefc+cifc is far more efficient than yebs+cebs.\n\
+Append/Prepend on Line scope:\n\
+  aals -> new line AFTER target line, aels -> inline at END of target line\n\
+  pbls -> new line BEFORE target line, pels -> inline at START of target line\n\
 \n\
 Edit examples:\n\
   cels(target:3) + value -> change line 3\n\
   dels(target:5) -> delete line 5\n\
   cifn(target:getData) + value -> rename function (identifier only)\n\
   cefd(target:handler) + value -> change full declaration incl. visibility\n\
-  aale(target:10) + value -> append after line 10\n\
-  rifc(target:handler) + value -> replace function contents";
+  aals(target:10) + value -> append new line after line 10\n\
+  cifc(target:handler, value:-) -> replace function body via stdin";
 
 pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {

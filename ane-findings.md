@@ -59,3 +59,17 @@
 **Expected outcome:** Lines 314-323 are output successfully, and lines 324-325 produce errors.
 
 **What actually happened:** The successful outputs and error messages were intermixed on stdout/stderr. This is expected shell behavior, not an ane bug per se, but the mixed output can be confusing. The error messages are correctly informative ("line 323 out of range (file has 323 lines)").
+## Finding 11: `aals` inserts content after the module closing brace
+
+**Action attempted:** `aals(target:6629, value:-)` to insert new test functions after the last test in a `mod tests` block.
+
+**Expected outcome:** The new content is inserted on a new line after line 6629 (the closing `}` of the last test function), which is still inside the `mod tests` block (line 6630 is the module's closing `}`).
+
+**What actually happened:** The content was inserted after line 6630 (the module's closing `}`), placing the test functions outside the `mod tests` block. The `aals` chord correctly targets the specified line, but the content landed one line too far — after `}` on line 6630 instead of between lines 6629 and 6630. This is likely because `target:6629` is 0-indexed internally to line 6630 which is the module close brace, and the content was appended after that line. The user intent was to insert before the module close, which would require `aals(target:6628)` or `pbls(target:6630)`.
+## Finding 12: `cels` replaced wrong line when target was ambiguous
+
+**Action attempted:** `cels(target:6675, value:"Some(1),")` to change line 6675 from `Some(2),` to `Some(1),`.
+
+**Expected outcome:** Line 6675 (`Some(2),`) is replaced with `Some(1),`.
+
+**What actually happened:** The line below (6676, `None,`) was replaced with `Some(1),`. The `cels` chord correctly targets line 6675, but the replacement changed the wrong line. Likely a 0-indexed vs 1-indexed confusion — the user intended 1-indexed line 6675, but internally it may have been treated as 0-indexed, targeting line 6676 in 1-indexed terms.

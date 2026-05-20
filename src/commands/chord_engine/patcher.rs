@@ -4,7 +4,7 @@ use anyhow::Result;
 use similar::TextDiff;
 
 use crate::data::buffer::Buffer;
-use crate::data::chord_types::Action;
+use crate::data::chord_types::{Action, Positional, Scope};
 
 use super::errors::ChordError;
 use super::text::{
@@ -126,8 +126,11 @@ fn build_action(
                 .get(point.start_line)
                 .map(|l| line_char_count(l))
                 .unwrap_or(0);
+            let auto_newline = point.start_col >= line_len
+                && !insertion.starts_with('\n')
+                && (query.positional == Positional::After || query.scope != Scope::Line);
             let prefixed;
-            let effective = if point.start_col >= line_len && !insertion.starts_with('\n') {
+            let effective = if auto_newline {
                 prefixed = format!("\n{insertion}");
                 &prefixed
             } else {
@@ -139,7 +142,17 @@ fn build_action(
             let insertion = resolution.replacement.as_deref().unwrap_or("");
             let first = resolution.target_ranges[0];
             let point = TextRange::point(first.start_line, first.start_col);
-            apply_single_replacement(buffer, &point, insertion)
+            let auto_newline = query.positional == Positional::Before
+                && query.scope == Scope::Line
+                && !insertion.ends_with('\n');
+            let suffixed;
+            let effective = if auto_newline {
+                suffixed = format!("{insertion}\n");
+                &suffixed
+            } else {
+                insertion
+            };
+            apply_single_replacement(buffer, &point, effective)
         }
         Action::Insert => {
             let insertion = resolution.replacement.as_deref().unwrap_or("");
@@ -332,9 +345,29 @@ mod tests {
         cursor: Option<CursorPosition>,
         mode: Option<EditorMode>,
     ) -> crate::commands::chord_engine::types::ChordAction {
+        run_patch_with(action, Positional::Entire, Scope::Line, lines, target, replacement, cursor, mode)
+    }
+
+    fn run_patch_with(
+        action: Action,
+        positional: Positional,
+        scope: Scope,
+        lines: &[&str],
+        target: TextRange,
+        replacement: Option<&str>,
+        cursor: Option<CursorPosition>,
+        mode: Option<EditorMode>,
+    ) -> crate::commands::chord_engine::types::ChordAction {
         let name = "test_buf";
         let buffer = buf(lines);
-        let query = make_query(action);
+        let query = ChordQuery {
+            action,
+            positional,
+            scope,
+            component: Component::Self_,
+            args: ChordArgs::default(),
+            requires_lsp: false,
+        };
         let resolution = make_resolution(target, replacement, cursor, mode);
         let mut resolutions = HashMap::new();
         resolutions.insert(name.to_string(), resolution);
@@ -818,12 +851,8 @@ mod tests {
         assert!(diff.hunks.is_empty());
     }
 
-    // Fix 5 — Append at end-of-line auto-prefixes newline
-
     #[test]
-    fn append_at_line_end_auto_prefixes_newline() {
-        // Target is a point at the end of "hello" (col 5 = line length).
-        // Append should insert "world" on a new line, not concatenate inline.
+    fn aels_appends_inline_at_end_of_line() {
         let target = TextRange {
             start_line: 0,
             start_col: 5,
@@ -840,8 +869,34 @@ mod tests {
         );
         let diff = action.diff.as_ref().unwrap();
         assert!(
+            diff.modified.contains("helloworld"),
+            "aels must append inline, got: {}",
+            diff.modified
+        );
+    }
+
+    #[test]
+    fn aals_appends_on_new_line_after() {
+        let target = TextRange {
+            start_line: 0,
+            start_col: 5,
+            end_line: 0,
+            end_col: 5,
+        };
+        let action = run_patch_with(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            &["hello"],
+            target,
+            Some("world"),
+            None,
+            None,
+        );
+        let diff = action.diff.as_ref().unwrap();
+        assert!(
             diff.modified.contains("hello\nworld"),
-            "expected 'hello\\nworld', got: {}",
+            "aals must insert on new line, got: {}",
             diff.modified
         );
     }
@@ -872,24 +927,76 @@ mod tests {
 
     #[test]
     fn aebs_value_starts_on_new_line() {
-        // Simulate aebs: target = entire buffer range (0,0) to (0, line_len).
-        // Fix 5 ensures the appended value lands on a new line.
         let target = TextRange {
             start_line: 0,
             start_col: 0,
             end_line: 0,
             end_col: 5,
         };
-        let action = run_patch(Action::Append, &["hello"], target, Some("new"), None, None);
+        let action = run_patch_with(
+            Action::Append,
+            Positional::Entire,
+            Scope::Buffer,
+            &["hello"],
+            target,
+            Some("new"),
+            None,
+            None,
+        );
         let diff = action.diff.as_ref().unwrap();
         assert!(
             diff.modified.ends_with("hello\nnew"),
             "appended value must start on a new line, got: {}",
             diff.modified
         );
+    }
+
+    #[test]
+    fn pels_prepends_inline_at_start_of_line() {
+        let target = TextRange {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+        };
+        let action = run_patch(
+            Action::Prepend,
+            &["hello"],
+            target,
+            Some("// "),
+            None,
+            None,
+        );
+        let diff = action.diff.as_ref().unwrap();
         assert!(
-            !diff.modified.contains("hellonew"),
-            "value must not be concatenated inline, got: {}",
+            diff.modified.contains("// hello"),
+            "pels must prepend inline, got: {}",
+            diff.modified
+        );
+    }
+
+    #[test]
+    fn pbls_prepends_on_new_line_before() {
+        let target = TextRange {
+            start_line: 1,
+            start_col: 0,
+            end_line: 1,
+            end_col: 0,
+        };
+        let action = run_patch_with(
+            Action::Prepend,
+            Positional::Before,
+            Scope::Line,
+            &["first", "second"],
+            target,
+            Some("inserted"),
+            None,
+            None,
+        );
+        let diff = action.diff.as_ref().unwrap();
+        assert!(
+            diff.modified.contains("first\ninserted\nsecond"),
+            "pbls must insert on new line before target, got: {}",
             diff.modified
         );
     }

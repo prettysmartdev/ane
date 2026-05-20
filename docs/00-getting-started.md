@@ -123,20 +123,29 @@ See [Using the TUI](03-using-the-tui.md) for the full keybinding reference and m
 Exec mode applies a single chord to a file and outputs a unified diff:
 
 ```sh
+# Discover what's in a file
+ane exec --chord "lefd" path/to/file.rs
+
+# Read one function body (prefer over reading the whole file)
+ane exec --chord "yefc(target:init)" src/main.rs
+
 # Change line 5 to new text
 ane exec --chord "cels(target:5, value:\"new text\")" path/to/file.rs
 
 # Delete line 3
 ane exec --chord "dels(target:3)" path/to/file.rs
 
-# Yank (read) the entire file
-ane exec --chord "yebs" path/to/file.rs
-
 # Replace a function body
 ane exec --chord "cifc(target:init, value:\"    todo!()\")" src/main.rs
+
+# Insert a new line after line 10
+ane exec --chord "aals(target:10, value:\"    let x = 1;\")" path/to/file.rs
+
+# Append inline at the end of line 10
+ane exec --chord "aels(target:10, value:\" // TODO\")" path/to/file.rs
 ```
 
-Exec mode writes a unified diff to stdout. Yank chords output the selected text instead.
+Exec mode writes a unified diff to stdout. Yank chords output the selected text instead. Use the narrowest scope possible -- `yefc`/`cifc` for one function is far more efficient than `yebs`/`cebs` for the whole file.
 
 See [Exec Mode](04-exec-mode.md) for stdin piping, agent integration patterns, and more.
 

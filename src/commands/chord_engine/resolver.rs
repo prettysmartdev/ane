@@ -100,6 +100,21 @@ fn resolve_buffer(
         replacement = Some(indent);
     }
 
+    let is_interactive_newline = replacement.is_none()
+        && query.scope == Scope::Line
+        && ((query.action == Action::Append && query.positional == Positional::After)
+            || (query.action == Action::Prepend && query.positional == Positional::Before));
+
+    if is_interactive_newline {
+        let indent: String = buffer
+            .lines
+            .get(scope_range.start_line)
+            .map(|l| l.chars().take_while(|c| c.is_whitespace()).collect())
+            .unwrap_or_default();
+        if !indent.is_empty() {
+            replacement = Some(indent);
+        }
+    }
     let primary = target_ranges.first().copied().unwrap_or(TextRange::point(
         scope_range.start_line,
         scope_range.start_col,
@@ -115,6 +130,15 @@ fn resolve_buffer(
         });
     }
 
+    if is_interactive_newline
+        && let Some(ref repl) = replacement
+        && let Some(ref cursor) = cursor_destination
+    {
+        cursor_destination = Some(CursorPosition {
+            line: cursor.line,
+            col: repl.len(),
+        });
+    }
     Ok(BufferResolution {
         target_ranges,
         scope_range,
@@ -1137,7 +1161,7 @@ fn apply_positional(
 ) -> Result<Vec<TextRange>> {
     match query.positional {
         Positional::Inside => {
-            if component_range.is_empty() {
+            if component_range.is_empty() || query.component == Component::Contents {
                 Ok(vec![*component_range])
             } else {
                 Ok(vec![shrink_range(buffer, component_range)])
@@ -1292,9 +1316,24 @@ fn resolve_cursor_and_mode(
             (Some(cursor), Some(EditorMode::Chord))
         }
         Action::Append | Action::Prepend | Action::Insert => {
-            let cursor = CursorPosition {
-                line: target_range.start_line,
-                col: target_range.start_col,
+            let new_line_insert = query.action == Action::Append
+                && query.positional == Positional::After
+                && query.scope == Scope::Line;
+            let cursor = if new_line_insert {
+                CursorPosition {
+                    line: target_range.start_line + 1,
+                    col: 0,
+                }
+            } else if query.action == Action::Append {
+                CursorPosition {
+                    line: target_range.end_line,
+                    col: target_range.end_col,
+                }
+            } else {
+                CursorPosition {
+                    line: target_range.start_line,
+                    col: target_range.start_col,
+                }
             };
             if query.args.value.is_some() {
                 (Some(cursor), Some(EditorMode::Chord))
@@ -1605,7 +1644,12 @@ fn find_brace_range(
     let mut range = scan_balanced(buffer, scope_range, '{', '}')
         .ok_or_else(|| ChordError::resolve(buffer_name, "no brace block found in scope"))?;
 
-    range = shrink_range(buffer, &range);
+    // scan_balanced returns the range including the `{` and `}` delimiters.
+    // Strip them directly rather than using shrink_range, which could
+    // incorrectly strip content that happens to start/end with matching
+    // delimiters (e.g. single-quoted strings).
+    range.start_col += 1;
+    range.end_col = range.end_col.saturating_sub(1);
 
     let start_line_rest_is_blank = buffer
         .lines
@@ -3594,6 +3638,69 @@ mod tests {
         let (cursor, mode) = resolve_cursor_and_mode(&q, &range);
         assert!(cursor.is_none());
         assert!(mode.is_none());
+    }
+
+    #[test]
+    fn cursor_aals_lands_on_next_line() {
+        let range = TextRange {
+            start_line: 3,
+            start_col: 10,
+            end_line: 3,
+            end_col: 10,
+        };
+        let q = query(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            None,
+        );
+        let (cursor, _) = resolve_cursor_and_mode(&q, &range);
+        assert_eq!(cursor, Some(CursorPosition { line: 4, col: 0 }));
+    }
+
+    #[test]
+    fn cursor_aels_lands_at_end_of_line() {
+        let range = TextRange {
+            start_line: 3,
+            start_col: 0,
+            end_line: 3,
+            end_col: 15,
+        };
+        let q = query(
+            Action::Append,
+            Positional::Entire,
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            None,
+        );
+        let (cursor, _) = resolve_cursor_and_mode(&q, &range);
+        assert_eq!(cursor, Some(CursorPosition { line: 3, col: 15 }));
+    }
+
+    #[test]
+    fn cursor_pbls_stays_on_inserted_line() {
+        let range = TextRange {
+            start_line: 5,
+            start_col: 0,
+            end_line: 5,
+            end_col: 0,
+        };
+        let q = query(
+            Action::Prepend,
+            Positional::Before,
+            Scope::Line,
+            Component::Self_,
+            None,
+            None,
+            None,
+        );
+        let (cursor, _) = resolve_cursor_and_mode(&q, &range);
+        assert_eq!(cursor, Some(CursorPosition { line: 5, col: 0 }));
     }
 
     // --- Full resolve() with mock LSP ---
@@ -6524,5 +6631,110 @@ mod tests {
         let cursor = res.cursor_destination.unwrap();
         assert_eq!(cursor.line, 1);
         assert_eq!(cursor.col, 4);
+    }
+
+    #[test]
+    fn aals_no_value_inherits_target_line_indentation() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn main() {", "        let x = 1;", "}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+        let mut q = query(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(1),
+            None,
+        );
+        q.args.value = None;
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement.as_deref(), Some("        "));
+        let cursor = res.cursor_destination.unwrap();
+        assert_eq!(cursor.line, 2);
+        assert_eq!(cursor.col, 8);
+    }
+
+    #[test]
+    fn pbls_no_value_inherits_target_line_indentation() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn main() {", "        let x = 1;", "}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+        let mut q = query(
+            Action::Prepend,
+            Positional::Before,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(1),
+            None,
+        );
+        q.args.value = None;
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement.as_deref(), Some("        "));
+        let cursor = res.cursor_destination.unwrap();
+        assert_eq!(cursor.line, 1);
+        assert_eq!(cursor.col, 8);
+    }
+
+    #[test]
+    fn aals_no_value_no_indentation_on_unindented_line() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(path, &["use std::io;", "fn main() {", "}"]);
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+        let mut q = query(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(1),
+            None,
+        );
+        q.args.value = None;
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement, None);
+        let cursor = res.cursor_destination.unwrap();
+        assert_eq!(cursor.line, 2);
+        assert_eq!(cursor.col, 0);
+    }
+
+    #[test]
+    fn aals_with_value_does_not_inject_indentation() {
+        let path = "/test/file.rs";
+        let buffer = named_buf(
+            path,
+            &["fn main() {", "        let x = 1;", "}"],
+        );
+        let mut buffers = HashMap::new();
+        buffers.insert(path.to_string(), buffer);
+        let mut lsp = no_lsp();
+        let q = query(
+            Action::Append,
+            Positional::After,
+            Scope::Line,
+            Component::Self_,
+            None,
+            Some(2),
+            None,
+        );
+        let resolved = resolve(&q, &buffers, &mut lsp).unwrap();
+        let res = resolved.resolutions.get(path).unwrap();
+        assert_eq!(res.replacement, None);
     }
 }

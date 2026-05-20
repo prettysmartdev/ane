@@ -163,14 +163,23 @@ ane exec --chord "ChangeInsideFunctionContents(target:foo, value:\"return 0;\")"
 ane exec --chord "cels(target:5, value:\"new text\")" path/to/file.rs
 ane exec --chord "dels(target:3)" path/to/file.rs
 
-# Yank (read) entire file
-ane exec --chord "yebs" path/to/file.rs
+# Discover functions before editing
+ane exec --chord "lefd" path/to/file.rs
+
+# Read one function body (prefer over reading the whole file)
+ane exec --chord "yefc(target:foo)" path/to/file.rs
 
 # Pipe value from stdin
 echo "new body" | ane exec --chord "cifc(target:foo, value:-)" path/to/file.rs
+
+# Append/Prepend on Line scope
+ane exec --chord "aals(target:10, value:\"new line\")" path/to/file.rs   # new line AFTER line 10
+ane exec --chord "aels(target:10, value:\" // note\")" path/to/file.rs   # inline at END of line 10
+ane exec --chord "pbls(target:10, value:\"// above\")" path/to/file.rs   # new line BEFORE line 10
+ane exec --chord "pels(target:10, value:\"/// \")" path/to/file.rs       # inline at START of line 10
 ```
 
-Exec mode outputs a unified diff to stdout showing what changed. Yank chords output the selected text.
+Exec mode outputs a unified diff to stdout showing what changed. Yank chords output the selected text. Prefer narrow scopes (`yefc`/`cifc` for one function) over broad ones (`yebs`/`cebs` for the whole file) to minimize output and reduce errors.
 
 See [Exec Mode](docs/04-exec-mode.md) for the full guide.
 

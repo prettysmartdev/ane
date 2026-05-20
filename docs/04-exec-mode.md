@@ -88,7 +88,11 @@ The skill file (under 400 tokens) teaches the agent ane's chord grammar so it ca
 ### Common agent patterns
 
 ```sh
-# Read a function's contents
+# Discover what's in a file before editing
+ane exec --chord "lefd" src/server.rs                       # list function signatures
+ane exec --chord "lefn" src/server.rs                       # list function names only
+
+# Read a function's contents (prefer over reading the whole file)
 ane exec --chord "yefc(target:handle_request)" src/server.rs
 
 # Replace a function body with agent-generated code
@@ -100,6 +104,31 @@ echo "$NEW_FUNCTION" | ane exec --chord "aefe(target:existing, value:-)" src/lib
 # Delete a deprecated function
 ane exec --chord "defs(target:old_handler)" src/server.rs
 ```
+
+### Append and Prepend line operations
+
+For Line scope, the positional controls whether a new line is created:
+
+```sh
+# aals — insert on a NEW LINE after the target line
+ane exec --chord "aals(target:10, value:\"    let x = 1;\")" src/main.rs
+
+# aels — append INLINE at the end of the target line (no newline)
+ane exec --chord "aels(target:10, value:\" // TODO\")" src/main.rs
+
+# pbls — insert on a NEW LINE before the target line
+ane exec --chord "pbls(target:10, value:\"// section header\")" src/main.rs
+
+# pels — prepend INLINE at the start of the target line (no newline)
+ane exec --chord "pels(target:10, value:\"/// \")" src/main.rs
+```
+
+### Efficiency tips for agents
+
+1. **Discover first**: run `lefd` or `lefn` to learn the file structure before reading or editing.
+2. **Read narrow**: use `yefc(target:fn_name)` for one function body, not `yebs` for the whole file.
+3. **Edit narrow**: use `cifc(target:fn_name, value:-)` to replace one function body, not `cebs`.
+4. **Yank before changing**: run `yefc` to understand what you're replacing before piping new content via `cifc`.
 
 ---
 

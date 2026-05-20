@@ -41,7 +41,7 @@ impl CliFrontend {
 
 impl ApplyChordAction for CliFrontend {
     fn apply(&mut self, state: &mut EditorState, action: &ChordAction) -> Result<String> {
-'		 // all good'
+	top of the mornin
     }
 }
 
