@@ -14,6 +14,7 @@ fn make_buffer(path: &str, content: &str) -> Buffer {
         trailing_newline: content.ends_with('\n'),
         last_disk_mtime: None,
         disk_changed: false,
+        disk_deleted: false,
     }
 }
 

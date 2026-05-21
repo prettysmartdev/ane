@@ -63,7 +63,8 @@ ane exec f.rs --chord "lemd"                        # list all member/field defi
 ane exec f.rs --chord "cels(target:3, value:\"new text\")"       # change line 3
 ane exec f.rs --chord "dels(target:5)"                            # delete line 5
 echo "x + 1" | ane exec f.rs --chord "civv(target:count, value:-)"    # change variable value
-ane exec f.rs --chord "cifn(target:getData, value:\"fetch\")"   # rename function
+ane exec f.rs --chord "cifn(target:getData, value:\"fetch\")"   # rename function (identifier only)
+echo "pub fn fetch(url: &str) -> Result<()>" | ane exec f.rs --chord "cefd(target:getData, value:-)"  # rewrite full signature
 ```
 
 ## Append and Prepend (line scope)
@@ -86,12 +87,12 @@ ane exec f.rs --chord "pels(target:10, value:\"/// \")"
 
 ## Component guide: Name vs Definition
 
-- **`n` (Name)** — the bare identifier only (`foo` in `fn foo()`). Use it to rename.
-- **`d` (Definition)** — the full declaration: visibility + `fn` + name + params + return type, excluding the body. Use it to change visibility or rewrite the signature.
+- **`n` (Name)** — bare identifier only. `cifn` renames without touching the signature.
+- **`d` (Definition)** — full declaration (visibility + `fn` + name + params + return type), excluding body. `cefd` changes visibility or rewrites the signature. **Do NOT use `cifn` for visibility/signature changes.**
 
 ```
-ane exec f.rs --chord "yefn(target:foo)"   # shows: foo
-ane exec f.rs --chord "yefd(target:foo)"   # shows: pub fn foo(x: i32) -> bool
+ane exec f.rs --chord "cifn(target:foo, value:\"bar\")"           # fn foo() → fn bar() (rename only)
+ane exec f.rs --chord "cefd(target:foo, value:\"pub fn foo()\")"  # fn foo() → pub fn foo() (visibility)
 ```
 
 ## Efficiency: use the narrowest scope

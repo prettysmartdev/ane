@@ -223,7 +223,7 @@ fn move_cursor_up(state: &mut EditorState, text_width: usize) {
                     let target = editor_pane::wrap_row_start(&prev_offsets, last_row) + col_in_row;
                     state.cursor_col = editor_pane::byte_col_from_display(prev_line, target);
                 } else {
-                    state.cursor_col = state.cursor_col.min(prev_line.len());
+                    state.cursor_col = snap_to_char_boundary(prev_line, state.cursor_col);
                 }
             }
         }
@@ -263,7 +263,7 @@ fn move_cursor_down(state: &mut EditorState, text_width: usize) {
                 if text_width > 0 {
                     state.cursor_col = editor_pane::byte_col_from_display(next_line, col_in_row);
                 } else {
-                    state.cursor_col = state.cursor_col.min(next_line.len());
+                    state.cursor_col = snap_to_char_boundary(next_line, state.cursor_col);
                 }
             }
         }
@@ -538,6 +538,21 @@ fn event_loop(
                     let _ = watcher.watch_file(&buf.path);
                 }
                 state.disk_changed_path = None;
+                state.pending_rewatch_path = None;
+            }
+
+            // Re-watch a file that was unwatched after a Remove/rename
+            // (common during atomic saves: write-to-temp then rename).
+            if let Some(rewatch_path) = state.pending_rewatch_path.take() {
+                if rewatch_path.exists() {
+                    let _ = watcher.watch_file(&rewatch_path);
+                    mark_disk_changed(state);
+                    if state.status_msg.contains("deleted from disk") {
+                        state.status_msg.clear();
+                    }
+                } else {
+                    state.pending_rewatch_path = Some(rewatch_path);
+                }
             }
 
             let has_tree = state.file_tree.is_some();
@@ -1294,18 +1309,40 @@ fn handle_edit_mode(
     modified
 }
 
+fn mark_disk_changed(state: &mut EditorState) {
+    if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+        let new_mtime = std::fs::metadata(&buf.path).and_then(|m| m.modified()).ok();
+        if new_mtime != buf.last_disk_mtime {
+            buf.disk_changed = true;
+            let fname = buf
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file");
+            state.disk_changed_path = Some(PathBuf::from(fname));
+        }
+    }
+}
+
 fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut FsWatcher) {
     let watched_file = watcher.watched_file().map(|p| p.to_path_buf());
 
     for path in &event.paths {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
+        // Fast path: a file we're waiting to re-watch just reappeared (atomic save completed).
+        if let Some(rewatch) = &state.pending_rewatch_path && canonical == *rewatch && matches!(event.kind, EventKind::Create(_)) {
+            state.pending_rewatch_path = None;
+            let _ = watcher.watch_file(path);
+            if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+                buf.disk_deleted = false;
+            }
+            mark_disk_changed(state);
+        }
+
         let is_watched_file = watched_file.as_ref().is_some_and(|wf| *wf == canonical);
 
         if is_watched_file {
-            // Treat Name(From) and the [from, to] of Name(Both) as deletion of
-            // the active file. Some backends emit a single Name event instead
-            // of paired Remove+Create.
             let is_rename_away = matches!(
                 event.kind,
                 EventKind::Modify(ModifyKind::Name(RenameMode::From | RenameMode::Both))
@@ -1320,27 +1357,48 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
                 EventKind::Modify(
                     ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any,
                 ) => {
-                    if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
-                        let new_mtime =
-                            std::fs::metadata(&buf.path).and_then(|m| m.modified()).ok();
-                        if new_mtime != buf.last_disk_mtime {
-                            buf.disk_changed = true;
-                            let fname = buf
-                                .path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("file");
-                            state.disk_changed_path = Some(PathBuf::from(fname));
-                        }
-                    }
+                    mark_disk_changed(state);
                 }
                 EventKind::Remove(_) => {
+                    // Check if the file still exists (atomic save: temp+rename
+                    // replaces the file before the Remove event is processed).
+                    let file_exists = state
+                        .buffers
+                        .get(state.active_buffer)
+                        .is_some_and(|b| b.path.exists());
+                    if file_exists {
+                        mark_disk_changed(state);
+                        if let Some(buf) = state.buffers.get(state.active_buffer) {
+                            let _ = watcher.watch_file(&buf.path);
+                        }
+                    } else {
+                        state.pending_rewatch_path =
+                            watcher.watched_file().map(|p| p.to_path_buf());
+                        handle_active_file_removed(state);
+                        watcher.unwatch_file();
+                    }
+                }
+                EventKind::Modify(ModifyKind::Name(_)) if is_rename_away => {
+                    state.pending_rewatch_path =
+                        watcher.watched_file().map(|p| p.to_path_buf());
                     handle_active_file_removed(state);
                     watcher.unwatch_file();
                 }
-                EventKind::Modify(ModifyKind::Name(_)) if is_rename_away => {
-                    handle_active_file_removed(state);
-                    watcher.unwatch_file();
+                // macOS FSEvents emits Name(Any) for atomic saves and ambiguous
+                // renames. Check if the file still exists to distinguish.
+                EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
+                    let file_exists = state
+                        .buffers
+                        .get(state.active_buffer)
+                        .is_some_and(|b| b.path.exists());
+                    if file_exists {
+                        mark_disk_changed(state);
+                    } else {
+                        state.pending_rewatch_path =
+                            watcher.watched_file().map(|p| p.to_path_buf());
+                        handle_active_file_removed(state);
+                        watcher.unwatch_file();
+                    }
                 }
                 _ => {}
             }
@@ -1352,7 +1410,7 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
             EventKind::Create(_) | EventKind::Remove(_) => {
                 apply_tree_event(state, event);
             }
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            EventKind::Modify(ModifyKind::Name(_)) => {
                 apply_tree_event(state, event);
             }
             _ => {}
@@ -1360,40 +1418,65 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
     }
 }
 
+fn remove_path_from_tree(state: &mut EditorState, path: &Path) {
+    if let Some(tree) = &mut state.file_tree {
+        tree.entries
+            .retain(|e| !e.path.starts_with(path) && e.path != *path);
+    }
+    state
+        .tree_view
+        .retain(|e| !e.path.starts_with(path) && e.path != *path);
+    handle_removed_path(state, path);
+}
+
+fn create_path_in_tree(state: &mut EditorState, path: &Path) {
+    let inserted = if let Some(tree) = &mut state.file_tree {
+        insert_entry_sorted(tree, path)
+    } else {
+        return;
+    };
+    if let Some(entry) = inserted {
+        propagate_create_to_tree_view(state, &entry);
+    }
+}
+
 fn apply_tree_event(state: &mut EditorState, event: &notify::Event) {
     match event.kind {
         EventKind::Create(_) => {
             for path in &event.paths {
-                let inserted = if let Some(tree) = &mut state.file_tree {
-                    insert_entry_sorted(tree, path)
-                } else {
-                    return;
-                };
-                if let Some(entry) = inserted {
-                    propagate_create_to_tree_view(state, &entry);
-                }
+                create_path_in_tree(state, path);
             }
         }
-        EventKind::Remove(_) => {
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+            // File gone from this path. Don't canonicalize — the file no longer
+            // exists so canonicalize would fail. Notify paths are already
+            // canonical because watchers are registered with canonical roots.
             for path in &event.paths {
-                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
-                if let Some(tree) = &mut state.file_tree {
-                    tree.entries
-                        .retain(|e| !e.path.starts_with(&canonical) && e.path != canonical);
-                }
-                state
-                    .tree_view
-                    .retain(|e| !e.path.starts_with(&canonical) && e.path != canonical);
-                handle_removed_path(state, &canonical);
+                remove_path_from_tree(state, path);
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+            for path in &event.paths {
+                create_path_in_tree(state, path);
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() >= 2 => {
             let from = &event.paths[0];
             let to = &event.paths[1];
-            let from_canonical = from.canonicalize().unwrap_or_else(|_| from.clone());
+            // `from` no longer exists — use raw path (already canonical from watcher).
             let to_canonical = to.canonicalize().unwrap_or_else(|_| to.clone());
-            rename_subtree(&mut state.file_tree, &from_canonical, &to_canonical);
-            rename_in_tree_view(&mut state.tree_view, &from_canonical, &to_canonical);
+            rename_subtree(&mut state.file_tree, from, &to_canonical);
+            rename_in_tree_view(&mut state.tree_view, from, &to_canonical);
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
+            // macOS FSEvents: ambiguous rename. Check each path on disk.
+            for path in &event.paths {
+                if path.exists() {
+                    create_path_in_tree(state, path);
+                } else {
+                    remove_path_from_tree(state, path);
+                }
+            }
         }
         _ => {}
     }
@@ -1430,15 +1513,7 @@ fn rebase_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
 fn handle_active_file_removed(state: &mut EditorState) {
     if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
         buf.disk_changed = false;
-        let fname = buf
-            .path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file");
-        let msg = format!("{fname} deleted from disk. Ctrl-S to restore.");
-        if state.status_msg != msg {
-            state.status_msg = msg;
-        }
+        buf.disk_deleted = true;
         state.disk_changed_path = None;
     }
 }
@@ -1523,18 +1598,11 @@ fn insert_entry_sorted(
 }
 
 fn handle_removed_path(state: &mut EditorState, path: &Path) {
-    if let Some(buf) = state.current_buffer() {
+    if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
         let buf_canonical = buf.path.canonicalize().unwrap_or_else(|_| buf.path.clone());
         if buf_canonical == path || buf.path == path {
-            let fname = buf
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file");
-            let msg = format!("{fname} deleted from disk. Ctrl-S to restore.");
-            if state.status_msg != msg {
-                state.status_msg = msg;
-            }
+            buf.disk_deleted = true;
+            buf.disk_changed = false;
         }
     }
     if !state.tree_view.is_empty() {
@@ -1565,12 +1633,13 @@ fn reload_buffer_from_disk(state: &mut EditorState, syntax_engine: &mut SyntaxEn
             if state.cursor_line >= line_count {
                 state.cursor_line = line_count.saturating_sub(1);
             }
-            let line_len = state
+            if let Some(line) = state
                 .current_buffer()
                 .and_then(|b| b.lines.get(state.cursor_line))
-                .map_or(0, |l| l.len());
-            if state.cursor_col > line_len {
-                state.cursor_col = line_len;
+            {
+                state.cursor_col = snap_to_char_boundary(line, state.cursor_col);
+            } else {
+                state.cursor_col = 0;
             }
             if state.scroll_offset >= line_count {
                 state.scroll_offset = line_count.saturating_sub(1);
@@ -1806,12 +1875,15 @@ fn commit_tree_delete(state: &mut EditorState) {
         .tree_selected
         .min(state.tree_view.len().saturating_sub(1));
 
-    if state
+    let active_buf_affected = state
         .buffers
         .iter()
-        .any(|b| b.path.starts_with(&deleted_path))
-    {
-        state.status_msg = format!("{deleted_name} deleted — Ctrl-S to restore");
+        .any(|b| b.path.starts_with(&deleted_path));
+    if active_buf_affected {
+        if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
+            buf.disk_deleted = true;
+            buf.disk_changed = false;
+        }
     } else {
         state.status_msg = format!("deleted {deleted_name}");
     }
@@ -2752,6 +2824,26 @@ mod tests {
     }
 
     #[test]
+    fn reload_buffer_from_disk_snaps_cursor_to_char_boundary() {
+        let (f, mut state) = make_state_with_lines(&["hello"]);
+        state.cursor_col = 1;
+        state.buffers[0].disk_changed = true;
+
+        // 'ø' is 2 bytes; cursor_col 1 would be inside 'ø' without snapping
+        std::fs::write(f.path(), "øabc\n").unwrap();
+
+        let mut syntax = make_syntax();
+        reload_buffer_from_disk(&mut state, &mut syntax);
+
+        assert!(
+            state.current_buffer().unwrap().lines[0].is_char_boundary(state.cursor_col),
+            "cursor_col {} must be on a char boundary after reload",
+            state.cursor_col
+        );
+        assert_eq!(state.cursor_col, 0, "should snap back to byte 0");
+    }
+
+    #[test]
     fn apply_tree_event_insert_adds_entry_in_sorted_order() {
         use notify::event::CreateKind;
 
@@ -2880,7 +2972,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_fs_event_remove_sets_status_msg_and_clears_disk_changed() {
+    fn handle_fs_event_remove_sets_disk_deleted_and_clears_disk_changed() {
         use notify::event::RemoveKind;
 
         let (f, mut state) = make_state_with_lines(&["content"]);
@@ -2890,18 +2982,23 @@ mod tests {
         watcher.watch_file(f.path()).unwrap();
         let canonical = f.path().canonicalize().unwrap();
 
+        std::fs::remove_file(f.path()).unwrap();
+
         let event =
             notify::Event::new(notify::EventKind::Remove(RemoveKind::File)).add_path(canonical);
         handle_fs_event(&event, &mut state, &mut watcher);
 
         assert!(
-            state.status_msg.contains("deleted from disk"),
-            "status_msg should contain 'deleted from disk'; got: {:?}",
-            state.status_msg
+            state.buffers[0].disk_deleted,
+            "disk_deleted must be set after the file is removed"
         );
         assert!(
             !state.buffers[0].disk_changed,
             "disk_changed must be cleared after the file is removed"
+        );
+        assert!(
+            state.pending_rewatch_path.is_some(),
+            "pending_rewatch_path should be set so the file is re-watched if it reappears"
         );
     }
 

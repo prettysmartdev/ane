@@ -45,12 +45,14 @@ fn render_inner(
     let lsp_char_len: usize = lsp_spans.iter().map(|s| s.content.chars().count()).sum();
 
     let disk_hint: Option<String> = state.current_buffer().and_then(|buf| {
-        if buf.disk_changed {
-            let fname = buf
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file");
+        let fname = buf
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+        if buf.disk_deleted {
+            Some(format!(" {fname} deleted from disk. Ctrl-S to restore "))
+        } else if buf.disk_changed {
             Some(if buf.dirty {
                 format!(
                     " {} changed on disk. Ctrl-O to open and discard changes, Ctrl-S to overwrite with current changes ",
@@ -247,6 +249,36 @@ mod tests {
         assert!(
             !rendered.contains("Ctrl-Y: copy"),
             "selection hint should not appear when disk_changed is set; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn disk_deleted_shows_restore_hint() {
+        let (_f, mut state) = make_state(false, false);
+        if let Some(buf) = state.current_buffer_mut() {
+            buf.disk_deleted = true;
+        }
+        let rendered = render_to_string(&state);
+        assert!(
+            rendered.contains("deleted from disk") && rendered.contains("Ctrl-S to restore"),
+            "hint should show deletion message; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn disk_deleted_takes_priority_over_disk_changed() {
+        let (_f, mut state) = make_state(true, false);
+        if let Some(buf) = state.current_buffer_mut() {
+            buf.disk_deleted = true;
+        }
+        let rendered = render_to_string(&state);
+        assert!(
+            rendered.contains("deleted from disk"),
+            "deleted hint should take priority over changed hint; got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Ctrl-O"),
+            "changed hint should not appear when disk_deleted is set; got: {rendered:?}"
         );
     }
 }

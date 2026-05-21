@@ -288,6 +288,7 @@ mod tests {
             trailing_newline: false,
             last_disk_mtime: None,
             disk_changed: false,
+            disk_deleted: false,
         }
     }
 

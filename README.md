@@ -74,9 +74,9 @@ sudo make install
 3. **LSP-integrated** -- native language server integration for language-aware chords (Rust, Go, TypeScript/JavaScript, Python)
 
 ### Non-goals
-1. Be a perfect drop-in replacement for {favorite editor}. ane's similar-but-different chord system, lack of plugin system, and small-but-reasonable core featureset means it won't replace VSCode or your highly curated vim setup. It's an experiment on merging chords and language servers to see if humans and agents can develop code more efficiently.
-2. Be the absolute fastest or most memory efficient editor ever made. Adding a language server by default will always make `ane` slower than vim or emacs, and that's OK. It's a middle ground between "classic" terminal editors and full-on desktop editors like Zed, VSCode, and JetBrains products.
-3. Be extremely extensible (yet). The focus for `ane` is to nail the core featureset (robust chord engine, reliable language server integration, be extremely usable by code agents via CLI or crate). Adding plugins would be great one day, but until the core featureset is at 1.0-level quality, plugins will not be a priority.
+1. Be a drop-in replacement for {favorite editor}. The chord system is intentionally different and the core featureset is small by design. It's an experiment in merging chords and language servers for humans and agents.
+2. Be the fastest or most memory-efficient editor. An embedded language server will always be slower than vim or emacs. `ane` sits between classic terminal editors and full desktop IDEs like Zed, VSCode, and JetBrains.
+3. Be extremely extensible (yet). The priority is nailing the core — chord engine, LSP integration, agent usability. Plugins would be great eventually, but not before the core reaches 1.0 quality.
 
 ---
 

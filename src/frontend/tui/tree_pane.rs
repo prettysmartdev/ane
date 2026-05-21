@@ -358,6 +358,7 @@ mod tests {
             list_dialog: None,
             cached_token_count: 0,
             disk_changed_path: None,
+            pending_rewatch_path: None,
             tree_rename_state: None,
             tree_delete_confirm: None,
             tree_new_file_state: None,

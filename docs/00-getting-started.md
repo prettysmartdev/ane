@@ -10,7 +10,7 @@ This guide walks you through the core concepts and gets you making edits.
 
 ### Chords
 
-A chord is a four-character instruction that describes an edit:
+A chord is a four-part instruction that describes an edit:
 
 ```
 <action><positional><scope><component>
@@ -23,6 +23,8 @@ Arguments are passed in parentheses:
 ```
 cifc(target:foo, value:"return 0;")
 ```
+
+The positional can also be a digit `1`–`9` for count-based operations (e.g. `j5lw` -- jump forward 5 words).
 
 See [Chord System](01-chord-system.md) for the full reference and [Chord Examples](02-chord-examples.md) for worked before/after examples of every valid combination.
 
@@ -68,7 +70,7 @@ cargo install ane-editor
 mise use -g github:prettysmartdev/ane
 ```
 
-To pin to a specific version: `mise use -g github:prettysmartdev/ane@0.1.0`
+To pin to a specific version: `mise use -g github:prettysmartdev/ane@0.2.0`
 
 **From GitHub Releases** -- download the binary for your platform from [GitHub Releases](https://github.com/prettysmartdev/ane/releases):
 
@@ -112,7 +114,10 @@ Key reference:
 | `Ctrl-T` | Toggle file tree |
 | `Ctrl-S` | Save file |
 | `Ctrl-C` | Exit (confirmation modal) |
+| `Ctrl-O` | Reload file from disk (when external change detected) |
 | `Arrow keys` | Navigate cursor |
+
+When the file tree is focused, `Ctrl-R` renames, `Ctrl-D` deletes, and `Ctrl-N` creates a new file. The tree live-updates when files change on disk.
 
 See [Using the TUI](03-using-the-tui.md) for the full keybinding reference and mode details.
 
@@ -157,7 +162,7 @@ If you're building a code agent or custom tooling, you can use ane as a Rust cra
 
 ```toml
 [dependencies]
-ane-editor = { version = "0.1", default-features = false }
+ane-editor = { version = "0.2", default-features = false }
 ```
 
 This gives you the chord engine, LSP engine, buffer management, and a tool definition for LLM integration -- without pulling in `clap`, `crossterm`, or `ratatui`.
@@ -166,9 +171,9 @@ See [Embedding via Crate](05-embedding-via-crate.md) for the full API surface an
 
 ---
 
-## Teaching ane to your code agent
+## Teaching ane to your code agent (optional)
 
-ane can generate a token-efficient skill file for any supported code agent:
+ane can optionally generate a token-efficient skill file that teaches a code agent the chord grammar:
 
 ```sh
 ane init claude      # creates .claude/skills/ane/SKILL.md
@@ -177,7 +182,7 @@ ane init codex       # creates .codex/skills/ane/SKILL.md
 
 Supported agents: claude, codex, gemini, opencode, cline, maki, charm.
 
-The skill file teaches the agent ane's chord grammar in under 400 tokens, so it can use `ane exec` for structured edits.
+The skill file is optional — agents can use `ane exec` directly — but it helps them pick the right chords without trial and error.
 
 ---
 

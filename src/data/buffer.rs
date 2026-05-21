@@ -14,6 +14,7 @@ pub struct Buffer {
     pub trailing_newline: bool,
     pub last_disk_mtime: Option<SystemTime>,
     pub disk_changed: bool,
+    pub disk_deleted: bool,
 }
 
 impl Buffer {
@@ -36,6 +37,7 @@ impl Buffer {
             trailing_newline,
             last_disk_mtime,
             disk_changed: false,
+            disk_deleted: false,
         })
     }
 
@@ -47,6 +49,7 @@ impl Buffer {
             trailing_newline: true,
             last_disk_mtime: None,
             disk_changed: false,
+            disk_deleted: false,
         }
     }
 
@@ -105,6 +108,7 @@ impl Buffer {
             .with_context(|| format!("writing {}", self.path.display()))?;
         self.dirty = false;
         self.disk_changed = false;
+        self.disk_deleted = false;
         self.record_disk_mtime();
         Ok(())
     }

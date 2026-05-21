@@ -2833,6 +2833,7 @@ mod tests {
             trailing_newline: false,
             last_disk_mtime: None,
             disk_changed: false,
+            disk_deleted: false,
         }
     }
 
@@ -2844,6 +2845,7 @@ mod tests {
             trailing_newline: false,
             last_disk_mtime: None,
             disk_changed: false,
+            disk_deleted: false,
         }
     }
 
@@ -3133,6 +3135,7 @@ mod tests {
             trailing_newline: false,
             last_disk_mtime: None,
             disk_changed: false,
+            disk_deleted: false,
         };
         let range = resolve_buffer_scope(&buffer).unwrap();
         assert_eq!(range.end_line, 0);
