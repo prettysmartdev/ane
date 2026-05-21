@@ -29,9 +29,10 @@ impl Buffer {
         if lines.is_empty() {
             lines.push(String::new());
         }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let last_disk_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         Ok(Self {
-            path: path.to_path_buf(),
+            path: canonical,
             lines,
             dirty: false,
             trailing_newline,

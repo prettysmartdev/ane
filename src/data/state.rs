@@ -196,7 +196,12 @@ impl EditorState {
     }
 
     pub fn open_file(&mut self, path: &Path) -> Result<()> {
-        if let Some(idx) = self.buffers.iter().position(|b| b.path == path) {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(idx) = self
+            .buffers
+            .iter()
+            .position(|b| b.path == canonical || b.path == path)
+        {
             if path.exists() {
                 if self.buffers[idx].dirty {
                     let new_mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();

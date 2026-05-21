@@ -3255,10 +3255,11 @@ mod tests {
         commit_tree_rename(&mut state, &mut syntax);
 
         let new_path = tmp.path().join("new.rs");
+        let canonical_new = new_path.canonicalize().unwrap_or(new_path);
         assert!(
-            state.buffers.iter().any(|b| b.path == new_path),
+            state.buffers.iter().any(|b| b.path == canonical_new),
             "a buffer should have the new path {:?}; buffers: {:?}",
-            new_path,
+            canonical_new,
             state.buffers.iter().map(|b| &b.path).collect::<Vec<_>>()
         );
     }
