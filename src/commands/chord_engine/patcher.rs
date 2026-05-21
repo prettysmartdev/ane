@@ -346,9 +346,19 @@ mod tests {
         cursor: Option<CursorPosition>,
         mode: Option<EditorMode>,
     ) -> crate::commands::chord_engine::types::ChordAction {
-        run_patch_with(action, Positional::Entire, Scope::Line, lines, target, replacement, cursor, mode)
+        run_patch_with(
+            action,
+            Positional::Entire,
+            Scope::Line,
+            lines,
+            target,
+            replacement,
+            cursor,
+            mode,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_patch_with(
         action: Action,
         positional: Positional,
@@ -960,14 +970,7 @@ mod tests {
             end_line: 0,
             end_col: 0,
         };
-        let action = run_patch(
-            Action::Prepend,
-            &["hello"],
-            target,
-            Some("// "),
-            None,
-            None,
-        );
+        let action = run_patch(Action::Prepend, &["hello"], target, Some("// "), None, None);
         let diff = action.diff.as_ref().unwrap();
         assert!(
             diff.modified.contains("// hello"),

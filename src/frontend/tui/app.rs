@@ -1331,7 +1331,10 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         // Fast path: a file we're waiting to re-watch just reappeared (atomic save completed).
-        if let Some(rewatch) = &state.pending_rewatch_path && canonical == *rewatch && matches!(event.kind, EventKind::Create(_)) {
+        if let Some(rewatch) = &state.pending_rewatch_path
+            && canonical == *rewatch
+            && matches!(event.kind, EventKind::Create(_))
+        {
             state.pending_rewatch_path = None;
             let _ = watcher.watch_file(path);
             if let Some(buf) = state.buffers.get_mut(state.active_buffer) {
@@ -1379,8 +1382,7 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
                     }
                 }
                 EventKind::Modify(ModifyKind::Name(_)) if is_rename_away => {
-                    state.pending_rewatch_path =
-                        watcher.watched_file().map(|p| p.to_path_buf());
+                    state.pending_rewatch_path = watcher.watched_file().map(|p| p.to_path_buf());
                     handle_active_file_removed(state);
                     watcher.unwatch_file();
                 }
@@ -3253,12 +3255,10 @@ mod tests {
         commit_tree_rename(&mut state, &mut syntax);
 
         let new_path = tmp.path().join("new.rs");
-        // The buffer path must be canonicalized, so we canonicalize the expected path too.
-        let canonical_new = new_path.canonicalize().unwrap_or_else(|_| new_path.clone());
         assert!(
-            state.buffers.iter().any(|b| b.path == canonical_new),
+            state.buffers.iter().any(|b| b.path == new_path),
             "a buffer should have the new path {:?}; buffers: {:?}",
-            canonical_new,
+            new_path,
             state.buffers.iter().map(|b| &b.path).collect::<Vec<_>>()
         );
     }

@@ -77,9 +77,7 @@ fn resolve_buffer(
         && query.component == Component::Contents
         && replacement.is_none();
 
-    if is_interactive_cifc
-        && let Some(primary) = target_ranges.first()
-    {
+    if is_interactive_cifc && let Some(primary) = target_ranges.first() {
         let body_indent = buffer
             .lines
             .get(primary.start_line)
@@ -121,9 +119,7 @@ fn resolve_buffer(
     ));
     let (mut cursor_destination, mode_after) = resolve_cursor_and_mode(query, &primary);
 
-    if is_interactive_cifc
-        && let Some(ref repl) = replacement
-    {
+    if is_interactive_cifc && let Some(ref repl) = replacement {
         cursor_destination = Some(CursorPosition {
             line: primary.start_line,
             col: repl.len(),
@@ -6611,10 +6607,7 @@ mod tests {
     #[test]
     fn cifc_no_value_top_level_fn_uses_four_spaces() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn main() {", "    println!(\"hi\");", "}"],
-        );
+        let buffer = named_buf(path, &["fn main() {", "    println!(\"hi\");", "}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = mock_lsp(path, vec![sym("main", SymbolKind::Function, 0, 0, 2, 1)]);
@@ -6639,10 +6632,7 @@ mod tests {
     #[test]
     fn aals_no_value_inherits_target_line_indentation() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn main() {", "        let x = 1;", "}"],
-        );
+        let buffer = named_buf(path, &["fn main() {", "        let x = 1;", "}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = no_lsp();
@@ -6667,10 +6657,7 @@ mod tests {
     #[test]
     fn pbls_no_value_inherits_target_line_indentation() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn main() {", "        let x = 1;", "}"],
-        );
+        let buffer = named_buf(path, &["fn main() {", "        let x = 1;", "}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = no_lsp();
@@ -6720,10 +6707,7 @@ mod tests {
     #[test]
     fn aals_with_value_does_not_inject_indentation() {
         let path = "/test/file.rs";
-        let buffer = named_buf(
-            path,
-            &["fn main() {", "        let x = 1;", "}"],
-        );
+        let buffer = named_buf(path, &["fn main() {", "        let x = 1;", "}"]);
         let mut buffers = HashMap::new();
         buffers.insert(path.to_string(), buffer);
         let mut lsp = no_lsp();
