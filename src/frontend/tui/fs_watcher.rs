@@ -83,6 +83,7 @@ pub struct FsWatcher {
     overflow: Arc<AtomicBool>,
     tree_result: Arc<Mutex<TreeResult>>,
     watched_file: Option<PathBuf>,
+    installed_file: Arc<Mutex<Option<(PathBuf, PathBuf)>>>,
     watched_tree: Option<PathBuf>,
     generation: u64,
     scanning: bool,
@@ -102,6 +103,8 @@ impl FsWatcher {
         let tree_result = Arc::new(Mutex::new(None));
         let worker_overflow = Arc::clone(&overflow);
         let worker_result = Arc::clone(&tree_result);
+        let installed_file = Arc::new(Mutex::new(None));
+        let worker_file = Arc::clone(&installed_file);
         std::thread::spawn(move || {
             let changes = Arc::new(AtomicU64::new(0));
             let observed = Arc::clone(&changes);
@@ -158,7 +161,9 @@ impl FsWatcher {
                                 let _ = watcher.unwatch(&old);
                             }
                             if let Some(path) = path {
-                                let canonical = path.canonicalize().unwrap_or(path);
+                                let canonical =
+                                    path.canonicalize().unwrap_or_else(|_| path.clone());
+                                *worker_file.lock().unwrap() = Some((path, canonical.clone()));
                                 if watcher
                                     .watch(&canonical, RecursiveMode::NonRecursive)
                                     .is_ok()
@@ -225,6 +230,7 @@ impl FsWatcher {
             overflow,
             tree_result,
             watched_file: None,
+            installed_file,
             watched_tree: None,
             generation: 0,
             scanning: false,
@@ -235,7 +241,14 @@ impl FsWatcher {
         self.commands.submit(command);
         Ok(())
     }
-    pub fn next_event(&self) -> Option<notify::Result<notify::Event>> {
+    pub fn next_event(&mut self) -> Option<notify::Result<notify::Event>> {
+        // Publish the worker's canonical namespace before consuming its events.
+        // Resolving symlinks here would put filesystem I/O back on the UI thread.
+        if let Some((requested, canonical)) = self.installed_file.lock().unwrap().take()
+            && self.watched_file.as_ref() == Some(&requested)
+        {
+            self.watched_file = Some(canonical);
+        }
         let event = self.rx.try_recv().ok()?;
         if let Some(path) = update_path(&event) {
             self.coalesced.lock().unwrap().remove(path);
@@ -343,6 +356,17 @@ mod tests {
         let mut watcher = FsWatcher::new().unwrap();
         watcher.watch_file(f.path()).unwrap();
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if watcher.next_event().is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watch installation timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let expected_canonical = f.path().canonicalize().unwrap();
         assert_eq!(
             watcher.watched_file().map(|p| p.to_path_buf()),
@@ -350,7 +374,6 @@ mod tests {
             "watched_file should be set to the canonical path after watch_file"
         );
 
-        std::thread::sleep(Duration::from_millis(50));
         std::fs::write(f.path(), b"modified\n").unwrap();
 
         let result = watcher.rx.recv_timeout(Duration::from_secs(1));
@@ -365,6 +388,31 @@ mod tests {
             "watched_file should be None after unwatch_file"
         );
     }
+    #[cfg(unix)]
+    #[test]
+    fn canonical_watch_path_is_published_for_a_symlinked_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("file"), "initial").unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let requested = alias.join("file");
+        let canonical = requested.canonicalize().unwrap();
+        let mut watcher = FsWatcher::new().unwrap();
+        watcher.watch_file(&requested).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(Ok(event)) = watcher.next_event() {
+                assert_eq!(watcher.watched_file(), Some(canonical.as_path()));
+                assert!(event.paths.contains(&canonical));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     fn await_snapshot(watcher: &mut FsWatcher) -> crate::data::file_tree::FileTree {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {

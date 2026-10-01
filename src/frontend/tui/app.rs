@@ -2929,8 +2929,8 @@ mod tests {
         state.buffers[0].last_disk_mtime = Some(SystemTime::UNIX_EPOCH);
 
         let mut watcher = super::super::fs_watcher::FsWatcher::new().unwrap();
-        watcher.watch_file(f.path()).unwrap();
         let canonical = f.path().canonicalize().unwrap();
+        watcher.watch_file(&canonical).unwrap();
 
         let event = notify::Event::new(notify::EventKind::Modify(NModifyKind::Data(
             DataChange::Content,
@@ -3129,8 +3129,8 @@ mod tests {
         state.buffers[0].disk_changed = true;
 
         let mut watcher = super::super::fs_watcher::FsWatcher::new().unwrap();
-        watcher.watch_file(f.path()).unwrap();
         let canonical = f.path().canonicalize().unwrap();
+        watcher.watch_file(&canonical).unwrap();
 
         std::fs::remove_file(f.path()).unwrap();
 
