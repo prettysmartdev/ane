@@ -25,7 +25,7 @@ ane starts in Chord mode. A command box at the bottom accepts chord input:
 - Short-form chords (4 lowercase characters) **auto-execute** when the combination is valid for the current cursor position -- no Enter required.
 - Arrow keys (when the chord input is empty) move the cursor in the editor.
 - Arrow keys (when chord input has text) move within the chord input string.
-- Press **Esc** to clear the chord input.
+- Press **Esc** to clear the chord input, or cancel a chord that is still running.
 
 ### Edit mode
 
@@ -62,7 +62,7 @@ ane does not use `h`/`j`/`k`/`l` for navigation, `i` to enter insert mode, or `q
 
 ## File tree
 
-The file tree appears on the left when you open a directory, or when you press `Ctrl-T`.
+The file tree appears on the left when you open a directory, or when you press `Ctrl-T`. It shows a loading state while the directory scan and filesystem watches are prepared in the background; you can keep using the editor during this work. Generated, dependency, and hidden directories remain visible.
 
 - **Up/Down arrows** navigate the tree.
 - **Left/Right arrows** expand/collapse directories.
@@ -93,7 +93,7 @@ Non-LSP chords (Line, Buffer, Delimiter) work immediately regardless of LSP stat
 
 ane merges two highlighting sources into a single pass:
 
-1. **tree-sitter** — runs immediately on open, producing structural highlights (keywords, strings, comments, types) with no server required.
+1. **tree-sitter** — runs in a local background worker, producing structural highlights (keywords, strings, comments, types) with no server required. New edits replace queued work and outdated results are discarded.
 2. **LSP semantic tokens** — added once the language server is ready, layering type-aware colors on top (e.g. distinguishing a local variable from a function parameter, or a mutable binding from an immutable one).
 
 LSP tokens take precedence where they overlap, so colors become richer as the server initializes without any visible flash or re-render.
@@ -101,3 +101,9 @@ LSP tokens take precedence where they overlap, so colors become richer as the se
 ---
 
 [<- Chord Examples](02-chord-examples.md) | [Next: Exec Mode ->](04-exec-mode.md)
+
+## Pending work and diagnostics
+
+Chords resolve in the background. A pending chord shows `chord running — Esc to cancel`; changing its buffer, cursor, mode, or tree focus cancels its result. Confirmation dialogs retain priority over chord cancellation. Non-LSP chords can run while a language server is busy. Quit restores the terminal before waiting for language-server cleanup.
+
+For diagnosing pauses, launch with `ANE_TIMINGS=1`. Numeric operation durations and counts are written asynchronously to the system temporary directory as `ane-timings-<pid>.jsonl`. The log records build profile, OS, and architecture, and excludes file contents, paths, and request parameters. Its queue is bounded, so measurements may be dropped under heavy load. The filesystem watcher ignores the session's diagnostic file to prevent feedback loops. See the [responsiveness validation guide](../aspec/work-items/0016-tui-responsiveness-guide.md) for reproducible benchmarks.

@@ -39,7 +39,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(format!(" {title} "))
+        .title(if state.tree_loading {
+            format!(" {title} (loading) ")
+        } else {
+            format!(" {title} ")
+        })
         .border_style(border_style);
 
     if state.tree_view.is_empty() {
@@ -241,18 +245,17 @@ pub fn expand(state: &mut EditorState, idx: usize) {
         None => return,
     };
 
-    let children: Vec<_> = tree
-        .entries
+    let start = tree.entries.partition_point(|e| e.path <= entry.path);
+    let children: Vec<_> = tree.entries[start..]
         .iter()
+        .take_while(|e| e.path.starts_with(&entry.path))
         .filter(|e| {
             e.depth == entry.depth + 1 && e.path.parent().map(|p| p == entry.path).unwrap_or(false)
         })
         .cloned()
         .collect();
 
-    for (offset, child) in children.into_iter().enumerate() {
-        state.tree_view.insert(idx + 1 + offset, child);
-    }
+    state.tree_view.splice(idx + 1..idx + 1, children);
 }
 
 pub fn collapse(state: &mut EditorState, idx: usize) {
@@ -330,6 +333,7 @@ mod tests {
         EditorState {
             buffers: Vec::new(),
             active_buffer: 0,
+            tree_loading: false,
             file_tree: Some(FileTree {
                 root: root.clone(),
                 entries: all_entries,
@@ -357,6 +361,8 @@ mod tests {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            cached_loc: 0,
+            buffer_generation: 0,
             disk_changed_path: None,
             pending_rewatch_path: None,
             tree_rename_state: None,

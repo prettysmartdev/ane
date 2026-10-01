@@ -327,3 +327,98 @@ fn document_symbols_works_without_explicit_did_open() {
         .expect("document_symbols should succeed (auto-opens file)");
     assert!(!symbols.is_empty());
 }
+
+// WI-16: response deadlines apply after initialization, and workers do not
+// retain the engine lock while awaiting transport I/O.
+fn failure_config(flags: &[&str]) -> LspEngineConfig {
+    mock_config()
+        .with_server_override(
+            MOCK_SERVER,
+            flags.iter().map(|flag| (*flag).into()).collect(),
+            "true",
+        )
+        .with_request_timeout(Duration::from_millis(300))
+}
+
+#[test]
+fn silent_and_partial_semantic_responses_obey_request_deadline() {
+    for flag in ["--ignore-semantic", "--partial-semantic"] {
+        let mut engine = LspEngine::new(failure_config(&[flag]));
+        start_and_wait(&mut engine);
+        let mut client = engine.request_client();
+        let error = client
+            .semantic_tokens(rs_file(), "fn main() {}")
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"), "{flag}: {error}");
+    }
+}
+
+#[test]
+fn late_response_cannot_satisfy_the_next_request() {
+    use ane::commands::lsp_engine::LspProvider;
+    let mut engine = LspEngine::new(failure_config(&["--delay-first-symbol"]));
+    start_and_wait(&mut engine);
+    let mut client = engine.request_client();
+    assert!(
+        client
+            .document_symbols(rs_file())
+            .unwrap_err()
+            .to_string()
+            .contains("timed out")
+    );
+    let symbols = client.document_symbols(rs_file()).unwrap();
+    assert_eq!(
+        symbols[0].name, "main",
+        "the late response has a different request ID"
+    );
+}
+
+#[test]
+fn server_request_with_colliding_id_is_answered_before_initialize() {
+    let mut engine = LspEngine::new(failure_config(&["--client-request"]));
+    assert_eq!(start_and_wait(&mut engine), ServerState::Running);
+}
+
+#[test]
+fn client_queries_use_the_unsaved_buffer_snapshot() {
+    use ane::commands::lsp_engine::LspProvider;
+    let mut engine = LspEngine::new(failure_config(&["--echo-document"]));
+    start_and_wait(&mut engine);
+    let mut client = engine
+        .request_client()
+        .with_contents(std::collections::HashMap::from([(
+            rs_file().to_path_buf(),
+            "unsaved content".into(),
+        )]));
+    assert_eq!(
+        client.document_symbols(rs_file()).unwrap()[0].name,
+        "unsaved content"
+    );
+}
+
+#[test]
+fn cancellation_unblocks_a_silent_request_and_releases_interactive_priority() {
+    use ane::commands::lsp_engine::LspProvider;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let mut engine = LspEngine::new(failure_config(&["--ignore-symbols"]));
+    start_and_wait(&mut engine);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut client = engine
+        .request_client()
+        .with_cancellation(Arc::clone(&cancel));
+    assert!(engine.request_client().interactive_pending());
+    let worker = std::thread::spawn(move || client.document_symbols(rs_file()));
+    cancel.store(true, Ordering::Release);
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled")
+    );
+    assert!(!engine.request_client().interactive_pending());
+}

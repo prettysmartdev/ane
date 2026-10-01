@@ -43,8 +43,17 @@ use super::tree_pane;
 fn refresh_buffer_caches(state: &mut EditorState, syntax_engine: &mut SyntaxEngine) {
     if let Some(buf) = state.current_buffer() {
         let content = buf.content();
+        let loc = if syntax_engine.is_background() {
+            0
+        } else {
+            title_bar::compute_loc(&buf.lines)
+        };
         syntax_engine.compute(&buf.path, &content);
-        state.cached_token_count = title_bar::compute_token_count(&content);
+        state.buffer_generation = state.buffer_generation.wrapping_add(1);
+        if !syntax_engine.is_background() {
+            state.cached_token_count = title_bar::compute_token_count(&content);
+            state.cached_loc = loc;
+        }
     }
 }
 
@@ -143,12 +152,8 @@ fn delete_selection(state: &mut EditorState) -> bool {
 fn compute_text_width(state: &EditorState, term_width: u16) -> usize {
     let total = state.current_buffer().map_or(1, |b| b.line_count());
     let line_num_width = format!("{}", total.saturating_sub(1)).len();
-    let has_tree = state.file_tree.is_some() && state.focus_tree;
-    let editor_width = if has_tree {
-        (term_width as usize) / 2
-    } else {
-        term_width as usize
-    };
+    let editor_width =
+        compute_editor_render_area(state, Rect::new(0, 0, term_width, 24)).width as usize;
     editor_width.saturating_sub(line_num_width + 1)
 }
 
@@ -272,8 +277,6 @@ fn move_cursor_down(state: &mut EditorState, text_width: usize) {
 
 use super::tui_frontend::TuiFrontend;
 
-use crate::frontend::traits::ApplyChordAction;
-
 struct TuiInstallProgress {
     shared: Arc<Mutex<LspSharedState>>,
 }
@@ -293,40 +296,112 @@ impl InstallProgress for TuiInstallProgress {
     }
 }
 
-/// TUI implementation of SyntaxFrontend — stores tokens per-path for the render loop.
-struct TuiSyntaxReceiver {
-    tokens: Arc<Mutex<HashMap<PathBuf, Vec<SemanticToken>>>>,
+/// Immutable tokens shared with rendering; revisions gate both local and LSP results.
+#[derive(Default)]
+struct SyntaxSnapshot {
+    hash: u64,
+    tokens: Arc<Vec<SemanticToken>>,
+    metrics: Option<(usize, usize)>,
 }
-
+struct TuiSyntaxReceiver {
+    snapshots: Mutex<HashMap<PathBuf, SyntaxSnapshot>>,
+}
 impl TuiSyntaxReceiver {
     fn new() -> Self {
         Self {
-            tokens: Arc::new(Mutex::new(HashMap::new())),
+            snapshots: Mutex::new(HashMap::new()),
         }
     }
-
-    fn tokens_for(&self, path: &Path) -> Vec<SemanticToken> {
-        self.tokens
+    fn tokens_for(&self, path: &Path) -> Arc<Vec<SemanticToken>> {
+        self.snapshots
             .lock()
             .unwrap()
             .get(path)
-            .cloned()
+            .map(|s| Arc::clone(&s.tokens))
             .unwrap_or_default()
+    }
+    fn metrics_for(&self, path: &Path) -> Option<(usize, usize)> {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .get(path)
+            .and_then(|s| s.metrics)
+    }
+}
+impl SyntaxFrontend for TuiSyntaxReceiver {
+    fn begin_revision(&self, path: &Path, hash: u64) {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        let snapshot = snapshots.entry(path.to_path_buf()).or_default();
+        if snapshot.hash != hash {
+            snapshot.hash = hash;
+            snapshot.metrics = None;
+        }
+    }
+    fn set_semantic_tokens(&self, path: &Path, tokens: Vec<SemanticToken>) {
+        self.snapshots
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_default()
+            .tokens = Arc::new(tokens);
+    }
+    fn set_semantic_tokens_versioned(&self, path: &Path, hash: u64, tokens: Vec<SemanticToken>) {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        if let Some(snapshot) = snapshots.get_mut(path)
+            && snapshot.hash == hash
+        {
+            snapshot.tokens = Arc::new(tokens);
+        }
+    }
+    fn set_buffer_metrics_versioned(&self, path: &Path, hash: u64, loc: usize, tokens: usize) {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        if let Some(snapshot) = snapshots.get_mut(path)
+            && snapshot.hash == hash
+        {
+            snapshot.metrics = Some((loc, tokens));
+        }
     }
 }
 
-impl SyntaxFrontend for TuiSyntaxReceiver {
-    fn set_semantic_tokens(&self, path: &Path, tokens: Vec<SemanticToken>) {
-        self.tokens
-            .lock()
-            .unwrap()
-            .insert(path.to_path_buf(), tokens);
+/// Restore each successfully enabled terminal feature, even during setup errors.
+struct TerminalGuard {
+    raw: bool,
+    alternate: bool,
+    mouse: bool,
+}
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        let mut guard = Self {
+            raw: false,
+            alternate: false,
+            mouse: false,
+        };
+        enable_raw_mode()?;
+        guard.raw = true;
+        io::stdout().execute(EnterAlternateScreen)?;
+        guard.alternate = true;
+        io::stdout().execute(EnableMouseCapture)?;
+        guard.mouse = true;
+        Ok(guard)
+    }
+}
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.mouse {
+            let _ = io::stdout().execute(DisableMouseCapture);
+        }
+        if self.raw {
+            let _ = disable_raw_mode();
+        }
+        if self.alternate {
+            let _ = io::stdout().execute(LeaveAlternateScreen);
+        }
     }
 }
 
 pub fn run(path: &Path) -> Result<()> {
     let mut state = if path.is_dir() {
-        EditorState::for_directory(path)?
+        EditorState::for_directory_loading(path)?
     } else {
         EditorState::for_file(path)?
     };
@@ -352,7 +427,7 @@ pub fn run(path: &Path) -> Result<()> {
 
     // Create SyntaxEngine (Layer 1) — it owns the LspEngine reference
     // and spawns its own background worker for debounced LSP requests
-    let mut syntax_engine = SyntaxEngine::new(
+    let mut syntax_engine = SyntaxEngine::new_background(
         Arc::clone(&engine),
         Arc::clone(&syntax_receiver) as Arc<dyn SyntaxFrontend>,
     );
@@ -380,12 +455,11 @@ pub fn run(path: &Path) -> Result<()> {
         });
     }
 
-    enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
-    io::stdout().execute(EnableMouseCapture)?;
+    let terminal_guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
+    let shutdown = engine.lock().unwrap().shutdown_control();
     let mut frontend = TuiFrontend::new();
     let result = event_loop(
         &mut terminal,
@@ -397,13 +471,18 @@ pub fn run(path: &Path) -> Result<()> {
         &mut fs_watcher,
     );
 
-    {
-        let mut eng = engine.lock().unwrap();
-        eng.shutdown_all();
+    frontend.cancel_chord(&mut state);
+    drop(terminal);
+    drop(terminal_guard);
+    drop(syntax_engine);
+    let (done, finished) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        engine.lock().unwrap().shutdown_all();
+        let _ = done.send(());
+    });
+    if finished.recv_timeout(Duration::from_secs(2)).is_err() {
+        shutdown.terminate();
     }
-    io::stdout().execute(DisableMouseCapture)?;
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
 
     result
 }
@@ -454,10 +533,59 @@ fn event_loop(
     let mut prev_lsp_statuses: Vec<(Language, ServerState)> = Vec::new();
 
     loop {
+        let _iteration = crate::commands::diagnostics::Timing::new("event_loop");
+        if frontend.poll_chord(state) {
+            refresh_buffer_caches(state, syntax_engine);
+        }
         if let Some(watcher) = fs_watcher.as_mut() {
-            while let Ok(event) = watcher.rx.try_recv() {
+            if let Some(snapshot) = watcher.take_tree() {
+                match snapshot {
+                    Ok(tree) => apply_tree_snapshot(state, tree),
+                    Err(error) => {
+                        state.tree_loading = false;
+                        state.file_tree = None;
+                        state.tree_view.clear();
+                        state.focus_tree = false;
+                        state.mode = state.pre_tree_mode;
+                        watcher.unwatch_tree();
+                        state.status_msg = format!("tree error: {error}");
+                    }
+                }
+            }
+            let mut batch = crate::commands::diagnostics::Timing::new("filesystem_batch");
+            let mut event_count = 0;
+            let batch_start = std::time::Instant::now();
+            let mut scan_changed = false;
+            for _ in 0..64 {
+                if batch_start.elapsed() >= Duration::from_millis(5) {
+                    break;
+                }
+                let Some(event) = watcher.next_event() else {
+                    break;
+                };
+                event_count += 1;
                 if let Ok(ev) = event {
+                    scan_changed |= state.tree_loading
+                        && matches!(
+                            ev.kind,
+                            EventKind::Create(_)
+                                | EventKind::Remove(_)
+                                | EventKind::Modify(ModifyKind::Name(_))
+                        );
                     handle_fs_event(&ev, state, watcher);
+                }
+            }
+            batch.set_count(event_count);
+            if watcher.take_overflow() || scan_changed {
+                let _ = watcher.reconcile_tree();
+                // Lost events may also include the active file. Reconcile its
+                // disk state rather than silently ignoring an overflow.
+                if let Some(path) = watcher.watched_file().map(Path::to_path_buf) {
+                    if path.exists() {
+                        mark_disk_changed(state);
+                    } else {
+                        handle_active_file_removed(state);
+                    }
                 }
             }
         }
@@ -479,19 +607,28 @@ fn event_loop(
         }
         prev_lsp_statuses = lsp_statuses.clone();
 
+        if let Some(buf) = state.current_buffer()
+            && let Some((loc, count)) = syntax_receiver.metrics_for(&buf.path)
+        {
+            state.cached_loc = loc;
+            state.cached_token_count = count;
+        }
         // Read tokens from the syntax receiver
         let tokens = if let Some(buf) = state.current_buffer() {
             syntax_receiver.tokens_for(&buf.path)
         } else {
-            vec![]
+            Arc::default()
         };
 
         let term_size = terminal.size()?;
         adjust_scroll_offset(state, term_size.height, term_size.width);
 
-        terminal.draw(|frame| {
-            draw(frame, state, &tokens, &lsp_statuses);
-        })?;
+        {
+            let _timing = crate::commands::diagnostics::Timing::new("render");
+            terminal.draw(|frame| {
+                draw(frame, state, &tokens, &lsp_statuses);
+            })?;
+        }
 
         if state.should_quit {
             return Ok(());
@@ -502,7 +639,6 @@ fn event_loop(
 
         let prev_active = state.active_buffer;
         let prev_buf_path = state.current_buffer().map(|b| b.path.clone());
-        let had_tree = state.file_tree.is_some();
 
         if event::poll(Duration::from_millis(50))? {
             match event::read()? {
@@ -518,6 +654,7 @@ fn event_loop(
                         term_size.width,
                     );
                     if buffer_modified {
+                        frontend.cancel_chord(state);
                         state.selection = None;
                         refresh_buffer_caches(state, syntax_engine);
                     }
@@ -556,14 +693,58 @@ fn event_loop(
             }
 
             let has_tree = state.file_tree.is_some();
-            if has_tree && !had_tree {
+            if has_tree && watcher.watched_tree().is_none() {
                 if let Some(tree) = &state.file_tree {
                     let _ = watcher.watch_tree(&tree.root);
                 }
-            } else if !has_tree && had_tree {
+            } else if !has_tree && watcher.watched_tree().is_some() {
                 watcher.unwatch_tree();
             }
         }
+    }
+}
+
+fn apply_tree_snapshot(state: &mut EditorState, tree: crate::data::file_tree::FileTree) {
+    use std::collections::HashSet;
+    let selected = state
+        .tree_view
+        .get(state.tree_selected)
+        .map(|e| e.path.clone())
+        .or_else(|| {
+            (state.tree_loading && state.tree_view.is_empty())
+                .then(|| state.current_buffer().map(|b| b.path.clone()))
+                .flatten()
+        });
+    let expanded: HashSet<_> = state
+        .tree_view
+        .windows(2)
+        .filter(|pair| pair[1].depth > pair[0].depth)
+        .map(|pair| pair[0].path.clone())
+        .collect();
+    let mut hidden_depth = None;
+    let mut view = Vec::new();
+    for entry in &tree.entries {
+        if hidden_depth.is_some_and(|depth| entry.depth > depth) {
+            continue;
+        }
+        hidden_depth = None;
+        view.push(entry.clone());
+        if entry.is_dir && !expanded.contains(&entry.path) {
+            hidden_depth = Some(entry.depth);
+        }
+    }
+    state.tree_view = view;
+    state.tree_selected = selected
+        .and_then(|path| state.tree_view.iter().position(|e| e.path == path))
+        .unwrap_or(
+            state
+                .tree_selected
+                .min(state.tree_view.len().saturating_sub(1)),
+        );
+    state.file_tree = Some(tree);
+    state.tree_loading = false;
+    if state.status_msg == "loading file tree" {
+        state.status_msg = "file tree opened".into();
     }
 }
 
@@ -584,49 +765,43 @@ fn adjust_scroll_offset(state: &mut EditorState, term_height: u16, term_width: u
     }
 
     let line_num_width = format!("{}", total.saturating_sub(1)).len();
-    let has_tree = state.file_tree.is_some() && state.focus_tree;
-    let editor_width = if has_tree {
-        (term_width as usize) / 2
-    } else {
-        term_width as usize
-    };
+    let editor_width =
+        compute_editor_render_area(state, Rect::new(0, 0, term_width, term_height)).width as usize;
     let text_width = editor_width.saturating_sub(line_num_width + 1);
 
     if state.cursor_line < state.scroll_offset {
         state.scroll_offset = state.cursor_line;
     }
 
-    let active = state.active_buffer;
-    loop {
-        let mut visual_rows = 0;
-        let cursor = state.cursor_line.min(total.saturating_sub(1));
-        for i in state.scroll_offset..=cursor {
-            let line = state.buffers[active]
-                .lines
-                .get(i)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            if i == cursor {
-                let cursor_display_col = editor_pane::display_col(line, state.cursor_col);
-                let offsets = editor_pane::wrap_offsets(line, text_width);
-                let (cursor_row_in_line, _) =
-                    editor_pane::display_col_to_wrap_pos(&offsets, cursor_display_col);
-                visual_rows += cursor_row_in_line + 1;
-            } else {
-                visual_rows += editor_pane::visual_row_count(line, text_width);
-            }
-        }
-
-        if visual_rows <= visible || state.scroll_offset >= state.cursor_line {
+    // Walk backwards only as far as the viewport. Repeatedly scanning the
+    // entire distance from scroll_offset to a distant jump was quadratic.
+    let buffer = &state.buffers[state.active_buffer];
+    let cursor = state.cursor_line.min(total.saturating_sub(1));
+    let line = buffer.lines.get(cursor).map(String::as_str).unwrap_or("");
+    let cursor_display = editor_pane::display_col(line, state.cursor_col);
+    let mut prefix_end = state.cursor_col.min(line.len());
+    while !line.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let prefix_end = line[prefix_end..]
+        .char_indices()
+        .nth(text_width.max(1))
+        .map_or(line.len(), |(offset, _)| prefix_end + offset);
+    let offsets = editor_pane::wrap_offsets(&line[..prefix_end], text_width);
+    let cursor_rows = editor_pane::display_col_to_wrap_pos(&offsets, cursor_display).0 + 1;
+    let mut remaining = visible.saturating_sub(cursor_rows);
+    let mut first = cursor;
+    let old = state.scroll_offset.min(cursor);
+    while first > old && remaining > 0 {
+        let line = editor_pane::visible_prefix(&buffer.lines[first - 1], text_width, remaining);
+        let rows = editor_pane::visual_row_count(line, text_width);
+        if rows > remaining {
             break;
         }
-
-        state.scroll_offset += 1;
+        remaining -= rows;
+        first -= 1;
     }
-
-    if state.scroll_offset >= total {
-        state.scroll_offset = total.saturating_sub(1);
-    }
+    state.scroll_offset = first.min(total.saturating_sub(1));
 }
 
 struct PaneLayout {
@@ -643,10 +818,8 @@ fn compute_pane_layout(state: &EditorState, total: Rect) -> PaneLayout {
     let has_tree = state.file_tree.is_some() && state.focus_tree;
 
     let h_constraints = if has_tree {
-        let content_w = tree_pane::content_width(&state.tree_view) as u16;
-        let desired = content_w + 3;
-        let max_w = total.width / 2;
-        let tree_w = desired.min(max_w);
+        let content_w = tree_pane::content_width(&state.tree_view);
+        let tree_w = content_w.saturating_add(3).min((total.width / 2) as usize) as u16;
         vec![Constraint::Length(tree_w), Constraint::Min(0)]
     } else {
         vec![Constraint::Length(0), Constraint::Percentage(100)]
@@ -791,6 +964,10 @@ fn handle_key(
         return false;
     }
 
+    if code == KeyCode::Esc && frontend.has_pending() {
+        frontend.cancel_chord(state);
+        return false;
+    }
     // Priority 4: Ctrl-O reloads file from disk when disk_changed is set
     if code == KeyCode::Char('o')
         && modifiers.contains(KeyModifiers::CONTROL)
@@ -1093,14 +1270,6 @@ fn handle_chord_mode(
                 Ok(_) => {
                     clear_chord(state);
                     execute_chord_input(state, frontend, engine, &input, lsp_statuses);
-                    if !state.status_msg.starts_with("error:")
-                        && !state.status_msg.starts_with("resolve error:")
-                        && !state.status_msg.starts_with("patch error:")
-                        && !state.status_msg.starts_with("parse error:")
-                    {
-                        state.chord_history.push(input.clone());
-                    }
-                    refresh_buffer_caches(state, syntax_engine);
                 }
                 Err(_) => {
                     state.chord_error = true;
@@ -1138,7 +1307,7 @@ fn try_auto_submit(
     state: &mut EditorState,
     frontend: &mut TuiFrontend,
     engine: &Arc<Mutex<LspEngine>>,
-    syntax_engine: &mut SyntaxEngine,
+    _syntax_engine: &mut SyntaxEngine,
     lsp_statuses: &[(Language, ServerState)],
 ) {
     let input = &state.chord_input;
@@ -1148,18 +1317,8 @@ fn try_auto_submit(
             ChordEngine::try_auto_submit_short(input, state.cursor_line, state.cursor_col)
         {
             let input_clone = state.chord_input.clone();
-            state.chord_running = true;
             clear_chord(state);
             execute_chord_input(state, frontend, engine, &input_clone, lsp_statuses);
-            if !state.status_msg.starts_with("error:")
-                && !state.status_msg.starts_with("resolve error:")
-                && !state.status_msg.starts_with("patch error:")
-                && !state.status_msg.starts_with("parse error:")
-            {
-                state.chord_history.push(input_clone);
-            }
-            state.chord_running = false;
-            refresh_buffer_caches(state, syntax_engine);
         }
     } else if input.ends_with(')')
         && input.chars().next().is_some_and(|c| c.is_uppercase())
@@ -1167,18 +1326,8 @@ fn try_auto_submit(
         && ChordEngine::parse(input).is_ok()
     {
         let input_clone = state.chord_input.clone();
-        state.chord_running = true;
         clear_chord(state);
         execute_chord_input(state, frontend, engine, &input_clone, lsp_statuses);
-        if !state.status_msg.starts_with("error:")
-            && !state.status_msg.starts_with("resolve error:")
-            && !state.status_msg.starts_with("patch error:")
-            && !state.status_msg.starts_with("parse error:")
-        {
-            state.chord_history.push(input_clone);
-        }
-        state.chord_running = false;
-        refresh_buffer_caches(state, syntax_engine);
     }
 }
 
@@ -1325,10 +1474,15 @@ fn mark_disk_changed(state: &mut EditorState) {
 }
 
 fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut FsWatcher) {
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
     let watched_file = watcher.watched_file().map(|p| p.to_path_buf());
 
     for path in &event.paths {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        // Worker-installed watches use canonical roots; notification paths
+        // already share that namespace, including paths that no longer exist.
+        let canonical = path.clone();
 
         // Fast path: a file we're waiting to re-watch just reappeared (atomic save completed).
         if let Some(rewatch) = &state.pending_rewatch_path
@@ -1407,6 +1561,10 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
         }
     }
 
+    let selected = state
+        .tree_view
+        .get(state.tree_selected)
+        .map(|e| e.path.clone());
     if state.file_tree.is_some() {
         match event.kind {
             EventKind::Create(_) | EventKind::Remove(_) => {
@@ -1417,6 +1575,11 @@ fn handle_fs_event(event: &notify::Event, state: &mut EditorState, watcher: &mut
             }
             _ => {}
         }
+    }
+    if let Some(path) = selected
+        && let Some(index) = state.tree_view.iter().position(|e| e.path == path)
+    {
+        state.tree_selected = index;
     }
 }
 
@@ -1492,6 +1655,7 @@ fn rename_subtree(tree_opt: &mut Option<crate::data::file_tree::FileTree>, from:
             entry.path = new_path;
         }
     }
+    tree.entries.sort_by(|a, b| a.path.cmp(&b.path));
 }
 
 fn rename_in_tree_view(tree_view: &mut [FileEntry], from: &Path, to: &Path) {
@@ -1581,9 +1745,10 @@ fn insert_entry_sorted(
     if !canonical.starts_with(&tree.root) {
         return None;
     }
-    if tree.entries.iter().any(|e| e.path == canonical) {
-        return None;
-    }
+    let insert = match tree.entries.binary_search_by(|e| e.path.cmp(&canonical)) {
+        Ok(_) => return None,
+        Err(index) => index,
+    };
     let depth = canonical
         .strip_prefix(&tree.root)
         .map(|rel| rel.components().count().saturating_sub(1))
@@ -1594,8 +1759,7 @@ fn insert_entry_sorted(
         depth,
         is_dir,
     };
-    tree.entries.push(entry.clone());
-    tree.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    tree.entries.insert(insert, entry.clone());
     Some(entry)
 }
 
@@ -2037,30 +2201,23 @@ fn toggle_tree(state: &mut EditorState) {
                 _ => PathBuf::from("."),
             }
         };
-        match crate::data::file_tree::FileTree::from_dir(&dir) {
-            Ok(tree) => {
-                let tree_view: Vec<_> = tree
-                    .entries
-                    .iter()
-                    .filter(|e| e.depth == 0)
-                    .cloned()
-                    .collect();
-                state.file_tree = Some(tree);
-                state.tree_view = tree_view;
-                state.pre_tree_mode = state.mode;
-                state.focus_tree = true;
-                if let Some(buf) = state.current_buffer() {
-                    let buf_path = buf.path.clone();
-                    if let Some(idx) = state.tree_view.iter().position(|e| e.path == buf_path) {
-                        state.tree_selected = idx;
-                    }
-                }
-                state.status_msg = "file tree opened".into();
-            }
-            Err(e) => {
-                state.status_msg = format!("tree error: {e}");
-            }
-        }
+        let dir = if dir.is_absolute() {
+            dir
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(dir)
+        };
+        state.file_tree = Some(crate::data::file_tree::FileTree {
+            root: dir,
+            entries: Vec::new(),
+        });
+        state.tree_view.clear();
+        state.tree_selected = 0;
+        state.tree_loading = true;
+        state.pre_tree_mode = state.mode;
+        state.focus_tree = true;
+        state.status_msg = "loading file tree".into();
     }
 }
 
@@ -2095,41 +2252,32 @@ fn execute_chord_input(
 
             query.args.cursor_pos = Some((state.cursor_line, state.cursor_col));
 
-            let mut buffers = HashMap::new();
-            if let Some(buf) = state.current_buffer() {
-                let path_str = buf.path.to_string_lossy().to_string();
-                buffers.insert(path_str, buf.clone());
-            }
-
-            let resolve_result = {
-                let mut eng = engine.lock().unwrap();
-                ChordEngine::resolve(&query, &buffers, &mut eng)
-            };
-
-            match resolve_result {
-                Ok(resolved) => match ChordEngine::patch(&resolved, &buffers) {
-                    Ok(actions) => {
-                        for action in actions.values() {
-                            match frontend.apply(state, action) {
-                                Ok(msg) => {
-                                    if !msg.is_empty() && state.status_msg.is_empty() {
-                                        state.status_msg = msg;
-                                    }
-                                }
-                                Err(e) => {
-                                    state.status_msg = format!("error: {e}");
-                                }
-                            }
+            let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let provider: Box<dyn crate::commands::lsp_engine::LspProvider + Send> =
+                if query.requires_lsp {
+                    match engine.try_lock() {
+                        Ok(mut engine) => {
+                            let contents = state
+                                .current_buffer()
+                                .map(|buf| (buf.path.clone(), buf.content()))
+                                .into_iter()
+                                .collect();
+                            Box::new(
+                                engine
+                                    .request_client()
+                                    .with_contents(contents)
+                                    .with_cancellation(Arc::clone(&cancel)),
+                            )
+                        }
+                        Err(_) => {
+                            state.status_msg = "LSP busy — retry chord".into();
+                            return;
                         }
                     }
-                    Err(e) => {
-                        state.status_msg = format!("patch error: {e}");
-                    }
-                },
-                Err(e) => {
-                    state.status_msg = format!("resolve error: {e}");
-                }
-            }
+                } else {
+                    Box::new(crate::commands::lsp_engine::NoLsp)
+                };
+            frontend.submit_chord(state, input, query, provider, cancel);
         }
         Err(e) => {
             state.status_msg = format!("parse error: {e}");
@@ -3734,5 +3882,49 @@ mod tests {
             state.focus_tree, focus_before,
             "focus_tree must not toggle when Ctrl-T is pressed mid-rename"
         );
+    }
+    #[test]
+    fn old_syntax_and_metrics_cannot_overwrite_new_revision() {
+        let receiver = TuiSyntaxReceiver::new();
+        let path = Path::new("test.rs");
+        receiver.begin_revision(path, 1);
+        receiver.begin_revision(path, 2);
+        receiver.set_semantic_tokens_versioned(
+            path,
+            1,
+            vec![SemanticToken {
+                line: 0,
+                start_col: 0,
+                length: 1,
+                token_type: "keyword".into(),
+            }],
+        );
+        receiver.set_buffer_metrics_versioned(path, 1, 100, 200);
+        assert!(receiver.tokens_for(path).is_empty());
+        assert!(receiver.metrics_for(path).is_none());
+        receiver.set_buffer_metrics_versioned(path, 2, 3, 4);
+        assert_eq!(receiver.metrics_for(path), Some((3, 4)));
+    }
+
+    #[test]
+    fn distant_jump_scrolls_to_viewport_without_scanning_the_prefix() {
+        let (_f, mut state) = make_state_with_lines(&["x"]);
+        state.buffers[0].lines = vec!["x".into(); 100_000];
+        state.mode = Mode::Edit;
+        state.cursor_line = 99_999;
+        adjust_scroll_offset(&mut state, 24, 80);
+        assert_eq!(state.scroll_offset, 99_978);
+    }
+
+    #[test]
+    fn non_lsp_chord_submission_does_not_acquire_engine_lock() {
+        let (_f, mut state) = make_state_with_lines(&["hello"]);
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let guard = engine.lock().unwrap();
+        let mut frontend = TuiFrontend::new();
+        execute_chord_input(&mut state, &mut frontend, &engine, "yebs", &[]);
+        assert!(frontend.has_pending());
+        drop(guard);
+        frontend.cancel_chord(&mut state);
     }
 }

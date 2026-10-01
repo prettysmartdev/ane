@@ -35,14 +35,14 @@ Modes:
 
 Keybindings:
 - `Ctrl-E`: toggle between Edit mode and Chord mode
-- `Ctrl-T`: toggle file tree pane focus. If opened with single file and no tree exists, initiates a directory scan and shows the tree.
+- `Ctrl-T`: toggle file tree pane focus. If opened with single file and no tree exists, shows a loading tree and starts its scan and watcher setup in the background.
 - `Ctrl-C`: opens exit confirmation modal (press Ctrl-C again to exit, Esc to cancel)
 - `Ctrl-S`: save current file (Edit mode)
 - Arrow keys: navigate (both modes)
 - `Tab`: insert tab character (Edit mode only; not a keybinding)
 - `Enter`: execute chord (Chord mode) / open file from tree (tree focused) / newline (Edit mode)
 - `Backspace`: delete character (Edit mode) / delete last chord character (Chord mode)
-- `Esc`: clear chord input and status message (Chord mode)
+- `Esc`: cancel a pending chord, or clear chord input and status message (Chord mode); confirmation dialogs keep priority
 
 Removed keybindings:
 - No `h/j/k/l` navigation — arrow keys only

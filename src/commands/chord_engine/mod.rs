@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::commands::lsp_engine::LspEngine;
+use crate::commands::lsp_engine::LspProvider;
 use crate::data::buffer::Buffer;
 
 use types::{ChordAction, ChordQuery, ResolvedChord};
@@ -20,7 +20,7 @@ impl ChordEngine {
     pub fn execute(
         chord_input: &str,
         buffers: &HashMap<String, Buffer>,
-        lsp: &mut LspEngine,
+        lsp: &mut dyn LspProvider,
     ) -> Result<HashMap<String, ChordAction>> {
         let query = Self::parse(chord_input)?;
         let resolved = Self::resolve(&query, buffers, lsp)?;
@@ -34,7 +34,7 @@ impl ChordEngine {
     pub fn resolve(
         query: &ChordQuery,
         buffers: &HashMap<String, Buffer>,
-        lsp: &mut LspEngine,
+        lsp: &mut dyn LspProvider,
     ) -> Result<ResolvedChord> {
         resolver::resolve(query, buffers, lsp)
     }

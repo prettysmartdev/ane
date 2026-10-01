@@ -10,12 +10,12 @@ This guide explains how syntax highlighting works, which languages are supported
 
 ### Two-tier pipeline
 
-When you open or edit a file, ane runs two highlighting passes in parallel:
+When you open or edit a file in the TUI, ane schedules two independent highlighting workers:
 
-1. **Tree-sitter (synchronous, ~2ms)**
-   - Parses the code structure immediately
+1. **Tree-sitter (local background worker)**
+   - Parses the newest queued source snapshot
    - Highlights keywords, strings, types, comments, etc.
-   - Results appear instantly — no waiting for language servers
+   - Results appear without waiting for language servers; typing and navigation continue during parsing
    - Works the same way every time (structural, not semantic)
 
 2. **LSP semantic tokens (asynchronous, 300ms+)**
@@ -27,11 +27,11 @@ When you open or edit a file, ane runs two highlighting passes in parallel:
 
 ### Why two tiers?
 
-Tree-sitter is fast and language-agnostic — it works offline and scales instantly to large files. LSP is slower but smarter — it uses your project's type information and compiler knowledge to color code more precisely. By running both, you get the best of both worlds:
+Tree-sitter works offline. Token conversion uses indexed lines, and the TUI keeps previous highlights while a newer revision is computed. LSP is slower but smarter — it uses your project's type information and compiler knowledge to color code more precisely. By running both, you get the best of both worlds:
 
 - **Immediate visual feedback** via tree-sitter when you open a file
 - **Richer semantic coloring** via LSP once the server has time to analyze the code
-- **No typing lag** — tree-sitter re-highlights at 2ms per keystroke, LSP is debounced
+- **Responsive editing** — parsing, merging, and token counting run off the UI thread; outdated results are discarded and LSP requests are debounced
 
 ---
 

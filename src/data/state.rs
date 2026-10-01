@@ -72,6 +72,7 @@ pub struct EditorState {
     pub buffers: Vec<Buffer>,
     pub active_buffer: usize,
     pub file_tree: Option<FileTree>,
+    pub tree_loading: bool,
     pub cursor_line: usize,
     pub cursor_col: usize,
     pub scroll_offset: usize,
@@ -95,6 +96,8 @@ pub struct EditorState {
     pub selection: Option<Selection>,
     pub list_dialog: Option<ListDialogState>,
     pub cached_token_count: usize,
+    pub cached_loc: usize,
+    pub buffer_generation: u64,
     pub disk_changed_path: Option<PathBuf>,
     pub pending_rewatch_path: Option<PathBuf>,
     pub tree_rename_state: Option<TreeRenameState>,
@@ -113,6 +116,7 @@ impl EditorState {
             buffers: vec![buf],
             active_buffer: 0,
             file_tree: None,
+            tree_loading: false,
             cursor_line: 0,
             cursor_col: 0,
             scroll_offset: 0,
@@ -136,6 +140,8 @@ impl EditorState {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            cached_loc: 0,
+            buffer_generation: 0,
             disk_changed_path: None,
             pending_rewatch_path: None,
             tree_rename_state: None,
@@ -145,7 +151,21 @@ impl EditorState {
     }
 
     pub fn for_directory(path: &Path) -> Result<Self> {
-        let tree = FileTree::from_dir(path)?;
+        Self::with_tree(path, FileTree::from_dir(path)?, false)
+    }
+
+    pub fn for_directory_loading(path: &Path) -> Result<Self> {
+        Self::with_tree(
+            path,
+            FileTree {
+                root: path.to_path_buf(),
+                entries: Vec::new(),
+            },
+            true,
+        )
+    }
+
+    fn with_tree(path: &Path, tree: FileTree, loading: bool) -> Result<Self> {
         let tree_view: Vec<FileEntry> = tree
             .entries
             .iter()
@@ -156,6 +176,7 @@ impl EditorState {
             buffers: Vec::new(),
             active_buffer: 0,
             file_tree: Some(tree),
+            tree_loading: loading,
             cursor_line: 0,
             cursor_col: 0,
             scroll_offset: 0,
@@ -179,6 +200,8 @@ impl EditorState {
             selection: None,
             list_dialog: None,
             cached_token_count: 0,
+            cached_loc: 0,
+            buffer_generation: 0,
             disk_changed_path: None,
             pending_rewatch_path: None,
             tree_rename_state: None,

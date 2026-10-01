@@ -8,6 +8,8 @@ thread_local! {
 const MAX_PARSE_SIZE: usize = 512 * 1024;
 
 pub fn parse(lang: Language, content: &str) -> Vec<SemanticToken> {
+    let _timing =
+        crate::commands::diagnostics::Timing::new_count("tree_sitter_parse", content.len());
     #[cfg(test)]
     PARSE_COUNT.with(|c| c.set(c.get() + 1));
     if content.len() > MAX_PARSE_SIZE {
@@ -56,14 +58,14 @@ fn parse_with(
 
     let mut tokens = Vec::new();
     let mut cursor = root.walk();
-    walk_tree(&mut cursor, content, map_fn, &mut tokens);
+    walk_tree(&mut cursor, &SourceLines::new(content), map_fn, &mut tokens);
     tokens.sort_by_key(|t| (t.line, t.start_col));
     Some(tokens)
 }
 
 fn walk_tree(
     cursor: &mut tree_sitter::TreeCursor,
-    content: &str,
+    content: &SourceLines,
     map_fn: fn(&str) -> Option<&'static str>,
     tokens: &mut Vec<SemanticToken>,
 ) {
@@ -128,7 +130,7 @@ fn is_leaf_like(kind: &str) -> bool {
 
 fn emit_tokens_for_node(
     node: &tree_sitter::Node,
-    content: &str,
+    content: &SourceLines,
     token_type: &'static str,
     tokens: &mut Vec<SemanticToken>,
 ) {
@@ -147,9 +149,10 @@ fn emit_tokens_for_node(
             });
         }
     } else {
-        let lines: Vec<&str> = content.lines().collect();
+        let lines = &content.lines;
         for line_num in start_line..=end_line {
-            if let Some(line_text) = lines.get(line_num) {
+            if let Some(line) = lines.get(line_num) {
+                let line_text = line.text;
                 let char_count = line_text.chars().count();
                 let (start_col, end_col) = if line_num == start_line {
                     let sc = byte_to_char_col(content, line_num, node.start_position().column);
@@ -173,15 +176,43 @@ fn emit_tokens_for_node(
     }
 }
 
-fn byte_to_char_col(content: &str, line_num: usize, byte_col: usize) -> usize {
-    content
-        .lines()
-        .nth(line_num)
-        .map(|line| {
-            let safe_byte = byte_col.min(line.len());
-            line[..safe_byte].chars().count()
+/// Index each line once, including UTF-8 character boundaries for non-ASCII lines.
+/// Token conversion is O(1) for ASCII and O(log line length) for Unicode.
+struct SourceLines<'a> {
+    lines: Vec<SourceLine<'a>>,
+}
+
+struct SourceLine<'a> {
+    text: &'a str,
+    boundaries: Option<Vec<usize>>,
+}
+
+impl<'a> SourceLines<'a> {
+    fn new(content: &'a str) -> Self {
+        Self {
+            lines: content
+                .lines()
+                .map(|text| SourceLine {
+                    text,
+                    boundaries: (!text.is_ascii()).then(|| {
+                        text.char_indices()
+                            .map(|(i, _)| i)
+                            .chain(std::iter::once(text.len()))
+                            .collect()
+                    }),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn byte_to_char_col(content: &SourceLines, line_num: usize, byte_col: usize) -> usize {
+    content.lines.get(line_num).map_or(0, |line| {
+        let byte_col = byte_col.min(line.text.len());
+        line.boundaries.as_ref().map_or(byte_col, |boundaries| {
+            boundaries.partition_point(|&offset| offset < byte_col)
         })
-        .unwrap_or(0)
+    })
 }
 
 fn parse_markdown(content: &str) -> Vec<SemanticToken> {
@@ -333,12 +364,16 @@ fn parse_json(content: &str) -> Vec<SemanticToken> {
     };
     let mut tokens = Vec::new();
     let mut cursor = tree.root_node().walk();
-    walk_json(&mut cursor, content, &mut tokens);
+    walk_json(&mut cursor, &SourceLines::new(content), &mut tokens);
     tokens.sort_by_key(|t| (t.line, t.start_col));
     tokens
 }
 
-fn walk_json(cursor: &mut tree_sitter::TreeCursor, content: &str, tokens: &mut Vec<SemanticToken>) {
+fn walk_json(
+    cursor: &mut tree_sitter::TreeCursor,
+    content: &SourceLines,
+    tokens: &mut Vec<SemanticToken>,
+) {
     loop {
         let node = cursor.node();
         let kind = node.kind();
@@ -402,14 +437,14 @@ fn parse_yaml(content: &str) -> Vec<SemanticToken> {
     };
     let mut tokens = Vec::new();
     let mut cursor = tree.root_node().walk();
-    walk_yaml(&mut cursor, content, &mut tokens, false);
+    walk_yaml(&mut cursor, &SourceLines::new(content), &mut tokens, false);
     tokens.sort_by_key(|t| (t.line, t.start_col));
     tokens
 }
 
 fn walk_yaml(
     cursor: &mut tree_sitter::TreeCursor,
-    content: &str,
+    content: &SourceLines,
     tokens: &mut Vec<SemanticToken>,
     is_key: bool,
 ) {
@@ -527,12 +562,16 @@ fn parse_xml(content: &str) -> Vec<SemanticToken> {
     };
     let mut tokens = Vec::new();
     let mut cursor = tree.root_node().walk();
-    walk_xml(&mut cursor, content, &mut tokens);
+    walk_xml(&mut cursor, &SourceLines::new(content), &mut tokens);
     tokens.sort_by_key(|t| (t.line, t.start_col));
     tokens
 }
 
-fn walk_xml(cursor: &mut tree_sitter::TreeCursor, content: &str, tokens: &mut Vec<SemanticToken>) {
+fn walk_xml(
+    cursor: &mut tree_sitter::TreeCursor,
+    content: &SourceLines,
+    tokens: &mut Vec<SemanticToken>,
+) {
     loop {
         let node = cursor.node();
         let kind = node.kind();
@@ -579,7 +618,7 @@ fn walk_xml(cursor: &mut tree_sitter::TreeCursor, content: &str, tokens: &mut Ve
 
 fn walk_xml_attribute(
     cursor: &mut tree_sitter::TreeCursor,
-    content: &str,
+    content: &SourceLines,
     tokens: &mut Vec<SemanticToken>,
 ) {
     loop {
@@ -774,5 +813,23 @@ mod tests {
             tokens.is_empty(),
             "content over 512 KB should return empty tokens"
         );
+    }
+    #[test]
+    fn indexed_columns_preserve_unicode_crlf_and_final_lines() {
+        let content = "éλx\r\nascii\n😺z\n";
+        let source = super::SourceLines::new(content);
+        for (row, line) in content.lines().enumerate() {
+            for (byte, _) in line
+                .char_indices()
+                .chain(std::iter::once((line.len(), ' ')))
+            {
+                assert_eq!(
+                    super::byte_to_char_col(&source, row, byte),
+                    line[..byte].chars().count()
+                );
+            }
+        }
+        assert_eq!(super::byte_to_char_col(&source, 3, 0), 0);
+        assert!(parse(Language::Rust, &"let value = 123;\n".repeat(10_000)).len() >= 20_000);
     }
 }

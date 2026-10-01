@@ -161,7 +161,7 @@ pub(crate) fn screen_to_buffer(
     let mut logical_line = state.scroll_offset;
 
     while logical_line < buf.line_count() {
-        let line_text = &buf.lines[logical_line];
+        let line_text = visible_prefix(&buf.lines[logical_line], text_width, target_visual_row + 1);
         let row_count = visual_row_count(line_text, text_width);
 
         if accumulated_rows + row_count > target_visual_row {
@@ -185,6 +185,19 @@ pub(crate) fn screen_to_buffer(
     }
 }
 
+pub(crate) fn visible_prefix(line: &str, width: usize, rows: usize) -> &str {
+    // For zero-width panes still bound work to a single cell per row.
+    let limit = width.max(1).saturating_mul(rows.max(1)).saturating_add(1);
+    let mut columns = 0;
+    for (byte, character) in line.char_indices() {
+        if columns >= limit {
+            return &line[..byte];
+        }
+        columns += if character == '\t' { 4 } else { 1 };
+    }
+    line
+}
+
 fn styled_line_with_tokens<'a>(
     line_text: &'a str,
     line_num: usize,
@@ -196,7 +209,9 @@ fn styled_line_with_tokens<'a>(
         return vec![Span::styled(expand_tabs(line_text), base_style)];
     }
 
-    let line_tokens: Vec<&SemanticToken> = tokens.iter().filter(|t| t.line == line_num).collect();
+    let first = tokens.partition_point(|token| token.line < line_num);
+    let end = tokens.partition_point(|token| token.line <= line_num);
+    let line_tokens: Vec<&SemanticToken> = tokens[first..end].iter().collect();
     if line_tokens.is_empty() {
         return vec![Span::styled(expand_tabs(line_text), base_style)];
     }
@@ -252,7 +267,7 @@ fn wrap_spans(spans: Vec<Span<'_>>, text_width: usize) -> Vec<Vec<Span<'static>>
     let mut span_chars: Vec<(char, Style)> = Vec::new();
     for span in &spans {
         let style = span.style;
-        for ch in span.content.chars() {
+        for ch in expand_tabs(&span.content).chars() {
             span_chars.push((ch, style));
         }
     }
@@ -314,7 +329,11 @@ fn render_selection_highlight(
     let mut line_idx = scroll_offset;
 
     while accumulated_rows < visible_height && line_idx < buf.line_count() {
-        let line_text = &buf.lines[line_idx];
+        let line_text = visible_prefix(
+            &buf.lines[line_idx],
+            text_width,
+            visible_height - accumulated_rows,
+        );
         let offsets = wrap_offsets(line_text, text_width);
         let row_count = offsets.len();
 
@@ -390,6 +409,8 @@ pub fn render(
 
             while visual_lines.len() < visible_height && logical_line < buf.line_count() {
                 let line_text = &buf.lines[logical_line];
+                let remaining = visible_height - visual_lines.len();
+                let line_text = visible_prefix(line_text, text_width, remaining);
                 let is_current = logical_line == state.cursor_line;
 
                 let gutter_bg = Style::default().bg(Color::Rgb(40, 40, 50));
@@ -417,7 +438,7 @@ pub fn render(
 
                 let wrapped_rows = wrap_spans(content_spans, text_width);
 
-                if is_current {
+                if is_current && state.cursor_col <= line_text.len() {
                     let cursor_display_col = display_col(line_text, state.cursor_col);
                     let offsets = wrap_offsets(line_text, text_width);
                     let (c_wrap_row, c_col_in_row) =
@@ -739,5 +760,27 @@ mod tests {
     #[test]
     fn token_style_key_differs_from_string() {
         assert_ne!(token_style("key"), token_style("string"));
+    }
+    #[test]
+    fn viewport_prefix_preserves_visible_word_wrap_rows() {
+        for line in [
+            "aaa bbb ccc ddd eee fff",
+            "αβγ δ εζη θ",
+            "a\tb c\td ef",
+            "abcdefghijklmnop",
+        ] {
+            for width in 1..12 {
+                for rows in 1..5 {
+                    let full = super::wrap_spans(vec![Span::raw(line)], width);
+                    let prefix = super::visible_prefix(line, width, rows);
+                    let clipped = super::wrap_spans(vec![Span::raw(prefix)], width);
+                    assert_eq!(
+                        clipped.iter().take(rows).collect::<Vec<_>>(),
+                        full.iter().take(rows).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        assert!(super::visible_prefix(&"a".repeat(1_000_000), 80, 24).len() <= 1921);
     }
 }

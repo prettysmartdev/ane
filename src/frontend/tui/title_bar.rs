@@ -28,7 +28,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &EditorState) {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("untitled");
-            let loc = compute_loc(&buf.lines);
+            let loc = state.cached_loc;
             let lines_count = buf.lines.len();
             (name.to_string(), buf.dirty, loc, lines_count)
         }

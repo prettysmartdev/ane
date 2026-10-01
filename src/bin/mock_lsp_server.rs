@@ -41,6 +41,9 @@ fn main() {
         }
     }
 
+    let has = |flag: &str| args.iter().any(|arg| arg == flag);
+    let mut first_symbol = true;
+    let mut document_text = String::new();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -59,9 +62,46 @@ fn main() {
             .to_string();
         let id = value.get("id").cloned();
 
+        if method == "textDocument/semanticTokens/full" && has("--ignore-semantic") {
+            continue;
+        }
+        if method == "textDocument/documentSymbol" && has("--ignore-symbols") {
+            continue;
+        }
+        if method == "textDocument/semanticTokens/full" && has("--partial-semantic") {
+            write!(writer, "Content-Length: 100\r\n\r\n{{").unwrap();
+            writer.flush().unwrap();
+            continue;
+        }
         match method.as_str() {
+            "textDocument/didOpen" => {
+                document_text = value
+                    .pointer("/params/textDocument/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into();
+            }
+            "textDocument/didChange" => {
+                document_text = value
+                    .pointer("/params/contentChanges/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .into();
+            }
             "initialize" => {
                 if let Some(id) = id {
+                    if has("--client-request") {
+                        // Deliberately collide with the client's numeric ID.
+                        write_msg(
+                            &mut writer,
+                            &serde_json::json!({"jsonrpc":"2.0", "id":id,
+                            "method":"workspace/configuration", "params":{"items":[{}]}})
+                            .to_string(),
+                        );
+                        let answer = read_msg(&mut reader).expect("client configuration response");
+                        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+                        assert_eq!(answer["result"], serde_json::json!([null]));
+                    }
                     let resp = serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -77,12 +117,24 @@ fn main() {
             }
             "textDocument/documentSymbol" => {
                 if let Some(id) = id {
+                    let delayed = first_symbol && has("--delay-first-symbol");
+                    first_symbol = false;
+                    if delayed {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    let name = if has("--echo-document") {
+                        document_text.as_str()
+                    } else if delayed {
+                        "late"
+                    } else {
+                        "main"
+                    };
                     let resp = serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "result": [
                             {
-                                "name": "main",
+                                "name": name,
                                 "kind": 12,
                                 "range": {
                                     "start": {"line": 0, "character": 0},
