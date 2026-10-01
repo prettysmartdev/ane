@@ -1,5 +1,9 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::process::{ChildStdin, ChildStdout};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -30,6 +34,9 @@ pub(crate) fn decode_lsp_message<R: BufRead>(reader: &mut R) -> Result<Value> {
     }
     let length = content_length
         .ok_or_else(|| anyhow::anyhow!("missing Content-Length header in LSP message"))?;
+    if length > 16 * 1024 * 1024 {
+        bail!("LSP message exceeds 16 MiB limit");
+    }
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body)?;
     let value: Value = serde_json::from_slice(&body)?;
@@ -51,72 +58,224 @@ struct JsonRpcNotification {
     params: Value,
 }
 
+type Response = std::result::Result<Value, String>;
+type Pending = Arc<Mutex<HashMap<i64, mpsc::SyncSender<Response>>>>;
+
+/// Cloneable request endpoint. Dedicated threads own both pipes, so neither a
+/// silent stdout nor a full stdin pipe can trap a caller beyond its deadline.
+#[derive(Clone)]
 pub struct LspTransport {
-    writer: BufWriter<ChildStdin>,
-    reader: BufReader<ChildStdout>,
-    next_id: i64,
+    outgoing: mpsc::SyncSender<Value>,
+    pending: Pending,
+    next_id: Arc<AtomicI64>,
+    closed: Arc<AtomicBool>,
+    timeout: Duration,
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+fn fail_pending(pending: &Pending, error: String) {
+    let requests = std::mem::take(&mut *pending.lock().unwrap());
+    for (_, sender) in requests {
+        let _ = sender.try_send(Err(error.clone()));
+    }
 }
 
 impl LspTransport {
     pub fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
+        let (outgoing, rx) = mpsc::sync_channel::<Value>(128);
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let writer_pending = Arc::clone(&pending);
+        let writer_closed = Arc::clone(&closed);
+        std::thread::spawn(move || {
+            let mut writer = BufWriter::new(stdin);
+            while let Ok(value) = rx.recv() {
+                let result = serde_json::to_vec(&value)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|body| {
+                        writer.write_all(&encode_lsp_message(&body))?;
+                        writer.flush()?;
+                        Ok(())
+                    });
+                if let Err(error) = result {
+                    writer_closed.store(true, Ordering::Release);
+                    fail_pending(&writer_pending, error.to_string());
+                    break;
+                }
+            }
+        });
+        let reader_pending = Arc::clone(&pending);
+        let reader_closed = Arc::clone(&closed);
+        let replies = outgoing.clone();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let message = match decode_lsp_message(&mut reader) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        reader_closed.store(true, Ordering::Release);
+                        fail_pending(&reader_pending, error.to_string());
+                        break;
+                    }
+                };
+                // Server requests have their own ID space. Never mistake one
+                // for a response, even if its numeric ID matches ours.
+                if let Some(method) = message.get("method").and_then(Value::as_str) {
+                    if let Some(id) = message.get("id") {
+                        let result = match method {
+                            "workspace/configuration" => {
+                                let count = message
+                                    .pointer("/params/items")
+                                    .and_then(Value::as_array)
+                                    .map_or(0, Vec::len);
+                                serde_json::json!({"jsonrpc":"2.0", "id": id, "result": vec![Value::Null; count]})
+                            }
+                            "client/registerCapability"
+                            | "client/unregisterCapability"
+                            | "window/workDoneProgress/create"
+                            | "workspace/workspaceFolders" => {
+                                serde_json::json!({"jsonrpc":"2.0", "id": id, "result": null})
+                            }
+                            _ => serde_json::json!({"jsonrpc":"2.0", "id": id,
+                                "error": {"code": -32601, "message": "Unsupported client request"}}),
+                        };
+                        if replies.try_send(result).is_err() {
+                            reader_closed.store(true, Ordering::Release);
+                            fail_pending(&reader_pending, "LSP writer queue full".into());
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if let Some(id) = message.get("id").and_then(Value::as_i64)
+                    && let Some(sender) = reader_pending.lock().unwrap().remove(&id)
+                {
+                    let response = if let Some(error) = message.get("error") {
+                        Err(format!("LSP error: {error}"))
+                    } else {
+                        Ok(message.get("result").cloned().unwrap_or(Value::Null))
+                    };
+                    let _ = sender.try_send(response);
+                }
+            }
+        });
         Self {
-            writer: BufWriter::new(stdin),
-            reader: BufReader::new(stdout),
-            next_id: 0,
+            outgoing,
+            pending,
+            next_id: Arc::new(AtomicI64::new(0)),
+            closed,
+            timeout: Duration::from_secs(5),
+            cancellation: None,
         }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    pub fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    pub fn cancel_pending(&self) {
+        fail_pending(&self.pending, "LSP session closed".into());
+    }
+
+    pub(crate) fn start_request(&mut self, method: &str, params: Value) -> Result<PendingRequest> {
+        if self.closed.load(Ordering::Acquire) {
+            bail!("LSP connection closed");
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.pending.lock().unwrap().insert(id, tx);
+        let request = serde_json::to_value(JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: method.into(),
+            params,
+        })?;
+        if let Err(error) = self.outgoing.try_send(request) {
+            self.pending.lock().unwrap().remove(&id);
+            bail!("LSP request queue unavailable: {error}");
+        }
+        Ok(PendingRequest {
+            transport: self.clone(),
+            id,
+            receiver: rx,
+            deadline: Instant::now() + self.timeout,
+            completed: false,
+            _timing: crate::commands::diagnostics::Timing::new("lsp_request"),
+        })
     }
 
     pub fn send_request(&mut self, method: &str, params: Value) -> Result<Value> {
-        let id = self.next_id();
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: method.to_string(),
-            params,
-        };
-        let content = serde_json::to_string(&request)?;
-        self.write_message(content.as_bytes())?;
-
-        loop {
-            let msg = self.read_message()?;
-            if msg.get("id").and_then(|v| v.as_i64()) == Some(id) {
-                if let Some(error) = msg.get("error") {
-                    let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
-                    let message = error
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown error");
-                    bail!("LSP error {}: {}", code, message);
-                }
-                return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
-            }
-        }
+        self.start_request(method, params)?.wait()
     }
 
     pub fn send_notification(&mut self, method: &str, params: Value) -> Result<()> {
-        let notification = JsonRpcNotification {
+        if self.closed.load(Ordering::Acquire) {
+            bail!("LSP connection closed");
+        }
+        let notification = serde_json::to_value(JsonRpcNotification {
             jsonrpc: "2.0",
-            method: method.to_string(),
+            method: method.into(),
             params,
-        };
-        let content = serde_json::to_string(&notification)?;
-        self.write_message(content.as_bytes())?;
-        Ok(())
+        })?;
+        self.outgoing
+            .try_send(notification)
+            .map_err(|e| anyhow::anyhow!("LSP notification queue unavailable: {e}"))
     }
+}
 
-    fn next_id(&mut self) -> i64 {
-        self.next_id += 1;
-        self.next_id
+/// Enqueue under a short document-ordering lock, then wait after releasing it.
+pub(crate) struct PendingRequest {
+    transport: LspTransport,
+    id: i64,
+    receiver: mpsc::Receiver<Response>,
+    deadline: Instant,
+    completed: bool,
+    _timing: crate::commands::diagnostics::Timing,
+}
+impl PendingRequest {
+    pub fn wait(mut self) -> Result<Value> {
+        loop {
+            if self
+                .transport
+                .cancellation
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Acquire))
+            {
+                bail!("LSP request cancelled");
+            }
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                bail!("LSP request timed out after {:?}", self.transport.timeout);
+            }
+            match self
+                .receiver
+                .recv_timeout(remaining.min(Duration::from_millis(10)))
+            {
+                Ok(response) => {
+                    self.completed = true;
+                    return response.map_err(anyhow::Error::msg);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => bail!("LSP connection closed"),
+            }
+        }
     }
-
-    fn write_message(&mut self, content: &[u8]) -> Result<()> {
-        self.writer.write_all(&encode_lsp_message(content))?;
-        self.writer.flush()?;
-        Ok(())
-    }
-
-    fn read_message(&mut self) -> Result<Value> {
-        decode_lsp_message(&mut self.reader)
+}
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.transport.pending.lock().unwrap().remove(&self.id);
+        if !self.completed {
+            let _ = self.transport.outgoing.try_send(serde_json::json!({"jsonrpc":"2.0", "method":"$/cancelRequest", "params":{"id":self.id}}));
+        }
     }
 }
 

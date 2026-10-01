@@ -15,6 +15,11 @@ use crate::data::lsp::types::{Language, SemanticToken};
 /// Layer 1 defines this; Layer 2 implements it.
 pub trait SyntaxFrontend: Send + Sync {
     fn set_semantic_tokens(&self, path: &Path, tokens: Vec<SemanticToken>);
+    fn begin_revision(&self, _path: &Path, _hash: u64) {}
+    fn set_buffer_metrics_versioned(&self, _path: &Path, _hash: u64, _loc: usize, _tokens: usize) {}
+    fn set_semantic_tokens_versioned(&self, path: &Path, _hash: u64, tokens: Vec<SemanticToken>) {
+        self.set_semantic_tokens(path, tokens);
+    }
 }
 
 struct LspRequest {
@@ -54,6 +59,13 @@ impl LspRequestSlot {
         let mut s = self.inner.lock().unwrap();
         s.request = Some(req);
         self.cv.notify_all();
+    }
+
+    fn defer(&self, request: LspRequest) {
+        let mut state = self.inner.lock().unwrap();
+        if state.request.is_none() && !state.shutdown {
+            state.request = Some(request);
+        }
     }
 
     /// Block until a request is available, or return None on shutdown.
@@ -105,13 +117,15 @@ impl LspRequestSlot {
 
 pub struct SyntaxEngine {
     ts_cache: HashMap<PathBuf, (u64, Vec<SemanticToken>)>,
+    local_slot: Option<Arc<LspRequestSlot>>,
+    worker_mode: bool,
     lsp_cache: Arc<Mutex<HashMap<PathBuf, Vec<SemanticToken>>>>,
     content_hashes: Arc<Mutex<HashMap<PathBuf, u64>>>,
     frontend: Arc<dyn SyntaxFrontend>,
     request_slot: Arc<LspRequestSlot>,
 }
 
-fn hash_content(content: &str) -> u64 {
+pub fn hash_content(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     hasher.finish()
@@ -136,6 +150,8 @@ impl SyntaxEngine {
 
         Self {
             ts_cache: HashMap::new(),
+            local_slot: None,
+            worker_mode: false,
             lsp_cache,
             content_hashes,
             frontend,
@@ -143,22 +159,101 @@ impl SyntaxEngine {
         }
     }
 
-    /// Returns immediately. Runs tree-sitter synchronously (<2ms), then
+    /// Local parsing, merging and counting use their own latest-wins worker,
+    /// independent of the LSP worker and its response latency.
+    pub fn new_background(
+        lsp_engine: Arc<Mutex<LspEngine>>,
+        frontend: Arc<dyn SyntaxFrontend>,
+    ) -> Self {
+        let mut worker = Self::new(lsp_engine, Arc::clone(&frontend));
+        worker.worker_mode = true;
+        let slot = Arc::new(LspRequestSlot::new());
+        let shell = Self {
+            ts_cache: HashMap::new(),
+            local_slot: Some(Arc::clone(&slot)),
+            worker_mode: false,
+            lsp_cache: Arc::clone(&worker.lsp_cache),
+            content_hashes: Arc::clone(&worker.content_hashes),
+            frontend,
+            request_slot: Arc::clone(&worker.request_slot),
+        };
+        std::thread::spawn(move || {
+            while let Some(mut req) = slot.take() {
+                while let Some(newer) = slot.wait_for_newer(Duration::from_millis(10)) {
+                    req = newer;
+                }
+                if slot.is_shutdown() {
+                    break;
+                }
+                if worker.content_hashes.lock().unwrap().get(&req.path) != Some(&req.content_hash) {
+                    continue;
+                }
+                worker.compute(&req.path, &req.content);
+                let loc = req
+                    .content
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count();
+                #[cfg(feature = "frontends")]
+                let count = {
+                    let _timing = crate::commands::diagnostics::Timing::new("token_count");
+                    tiktoken::get_encoding("o200k_base")
+                        .expect("built-in encoding")
+                        .count(&req.content)
+                };
+                #[cfg(not(feature = "frontends"))]
+                let count = 0;
+                worker.frontend.set_buffer_metrics_versioned(
+                    &req.path,
+                    req.content_hash,
+                    loc,
+                    count,
+                );
+            }
+        });
+        shell
+    }
+
+    pub fn is_background(&self) -> bool {
+        self.local_slot.is_some()
+    }
+
+    /// Runs cached local highlighting synchronously, then
     /// queues a debounced LSP token request on the background worker.
     pub fn compute(&mut self, path: &Path, content: &str) {
+        let content_hash = hash_content(content);
+        if !self.worker_mode {
+            self.frontend.begin_revision(path, content_hash);
+            self.content_hashes
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), content_hash);
+        }
+        if let Some(slot) = &self.local_slot {
+            slot.submit(LspRequest {
+                path: path.to_path_buf(),
+                content: content.to_owned(),
+                content_hash,
+                ts_tokens: Vec::new(),
+            });
+            return;
+        }
+        let _timing = crate::commands::diagnostics::Timing::new("syntax_compute");
         let lang = match Language::from_path(path) {
             Some(l) => l,
             None => {
                 // Unknown extension: clear any previous tokens so the
                 // frontend renders plain text. Matches spec edge case
                 // "Language with no tree-sitter and no LSP".
-                self.frontend.set_semantic_tokens(path, Vec::new());
+                self.frontend.set_semantic_tokens_versioned(
+                    path,
+                    hash_content(content),
+                    Vec::new(),
+                );
                 return;
             }
         };
         let caps = lang.capabilities();
-        let content_hash = hash_content(content);
-
         // Phase 1: tree-sitter (synchronous, cached by content hash)
         let ts_tokens = if caps.has_tree_sitter {
             if self.ts_cache.get(path).map(|(h, _)| *h) != Some(content_hash) {
@@ -186,13 +281,8 @@ impl SyntaxEngine {
         };
 
         // Deliver best-effort tokens to frontend immediately
-        self.frontend.set_semantic_tokens(path, merged);
-
-        // Update content hash for staleness detection by the worker
-        self.content_hashes
-            .lock()
-            .unwrap()
-            .insert(path.to_path_buf(), content_hash);
+        self.frontend
+            .set_semantic_tokens_versioned(path, content_hash, merged);
 
         // Phase 2: submit LSP request to the latest-wins slot. Any prior
         // unprocessed request is silently overwritten — the worker reads
@@ -227,9 +317,15 @@ impl SyntaxEngine {
             }
 
             // Fetch LSP semantic tokens
-            let lsp_tokens = engine
-                .lock()
-                .unwrap()
+            let mut client = engine.lock().unwrap().request_client();
+            if client.interactive_pending() {
+                slot.defer(req);
+                continue;
+            }
+            if content_hashes.lock().unwrap().get(&req.path) != Some(&req.content_hash) {
+                continue;
+            }
+            let lsp_tokens = client
                 .semantic_tokens(&req.path, &req.content)
                 .unwrap_or_default();
 
@@ -251,7 +347,7 @@ impl SyntaxEngine {
             } else {
                 req.ts_tokens
             };
-            frontend.set_semantic_tokens(&req.path, merged);
+            frontend.set_semantic_tokens_versioned(&req.path, req.content_hash, merged);
         }
     }
 }
@@ -261,6 +357,9 @@ impl Drop for SyntaxEngine {
         // Wake the worker thread so it can exit instead of blocking forever
         // on the slot's condvar.
         self.request_slot.signal_shutdown();
+        if let Some(slot) = &self.local_slot {
+            slot.signal_shutdown();
+        }
     }
 }
 
@@ -422,149 +521,63 @@ mod tests {
         assert_eq!(total, 11, "worker should fire exactly once after debounce");
     }
 
-    #[test]
-    fn staleness_check_discards_outdated_lsp_tokens() {
-        use crate::data::lsp::types::SemanticToken as ST;
+    fn assert_latest_semantic_delivery(queued: &[&str]) {
+        use crate::commands::lsp_engine::SemanticTestGate;
+        use std::sync::mpsc;
 
-        // Strategy: inject slow LSP tokens (400ms delay). After the debounce
-        // window (300ms), the worker calls semantic_tokens and SLEEPS for 400ms.
-        // During that sleep the test thread calls compute(B), updating
-        // content_hashes to hash(B). When the worker wakes and checks staleness,
-        // hash(A) ≠ hash(B) → SKIP. Only the two sync deliveries occur.
-        let path = std::path::PathBuf::from("staleness_test.rs");
-
+        let path = PathBuf::from("latest_wins.rs");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (delivery_tx, delivery_rx) = mpsc::channel();
+        struct Counter(mpsc::Sender<()>);
+        impl SyntaxFrontend for Counter {
+            fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
+                self.0.send(()).unwrap();
+            }
+        }
         let mut lsp = LspEngine::new(LspEngineConfig::default());
         lsp.inject_test_semantic_tokens(
             path.clone(),
-            vec![ST {
+            vec![SemanticToken {
                 line: 0,
                 start_col: 0,
                 length: 2,
-                token_type: "keyword".to_string(),
+                token_type: "keyword".into(),
             }],
         );
-        lsp.test_semantic_tokens_delay = Some(Duration::from_millis(400));
-
-        let call_count = Arc::new(Mutex::new(0usize));
-        let cc = Arc::clone(&call_count);
-        let counter_frontend = Arc::new({
-            struct Counter(Arc<Mutex<usize>>);
-            impl SyntaxFrontend for Counter {
-                fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
-                    *self.0.lock().unwrap() += 1;
-                }
-            }
-            Counter(cc)
-        });
-
-        let lsp_arc = Arc::new(Mutex::new(lsp));
-        let mut engine = SyntaxEngine::new(
-            Arc::clone(&lsp_arc),
-            counter_frontend as Arc<dyn SyntaxFrontend>,
+        lsp.test_semantic_gate = Some(Arc::new(SemanticTestGate {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let mut engine =
+            SyntaxEngine::new(Arc::new(Mutex::new(lsp)), Arc::new(Counter(delivery_tx)));
+        let timeout = Duration::from_secs(5);
+        engine.compute(&path, "fn a() {}");
+        delivery_rx.recv_timeout(timeout).unwrap(); // synchronous A
+        entered_rx.recv_timeout(timeout).unwrap(); // semantic A is blocked
+        for content in queued {
+            engine.compute(&path, content);
+            delivery_rx.recv_timeout(timeout).unwrap(); // synchronous edit
+        }
+        release_tx.send(()).unwrap();
+        entered_rx.recv_timeout(timeout).unwrap(); // newest snapshot only
+        assert!(
+            delivery_rx.try_recv().is_err(),
+            "stale A must not be delivered"
         );
+        release_tx.send(()).unwrap();
+        delivery_rx.recv_timeout(timeout).unwrap(); // newest semantic result
+        assert!(delivery_rx.try_recv().is_err());
+    }
 
-        // compute(A): queued, worker starts 300ms debounce
-        engine.compute(path.as_path(), "fn foo() {}");
-        assert_eq!(
-            *call_count.lock().unwrap(),
-            1,
-            "sync delivery for content A"
-        );
-
-        // Wait for debounce to expire so the worker starts the slow LSP call
-        std::thread::sleep(Duration::from_millis(350));
-
-        // compute(B): worker is now sleeping inside semantic_tokens (400ms delay).
-        // This updates content_hashes to hash(B), and req(B) is queued.
-        engine.compute(path.as_path(), "fn bar() {}");
-        assert_eq!(
-            *call_count.lock().unwrap(),
-            2,
-            "sync delivery for content B"
-        );
-
-        // Timeline after compute(B) at t=350ms:
-        //   t≈700ms  – slow LSP for req(A) returns; staleness check → SKIP
-        //   t≈700ms  – worker picks up req(B), 300ms debounce fires at t≈1000ms
-        //   t≈1400ms – slow LSP for req(B) returns; staleness OK → delivery #3
-        // Sleep 2100ms after compute(B) (total ~2450ms) to ensure delivery #3 has fired.
-        std::thread::sleep(Duration::from_millis(2100));
-
-        // delivery #3 comes from req(B) processed correctly; req(A) was discarded
-        let final_count = *call_count.lock().unwrap();
-        assert_eq!(
-            final_count, 3,
-            "req(A) stale → skip; req(B) not stale → deliver; total = 3"
-        );
+    #[test]
+    fn staleness_check_discards_outdated_lsp_tokens() {
+        assert_latest_semantic_delivery(&["fn b() {}"]);
     }
 
     #[test]
     fn latest_wins_during_slow_lsp_call() {
-        // True latest-wins: while the worker is inside a slow semantic_tokens
-        // call for content A, two more computes happen (B then C). Both B and C
-        // are submitted to the slot; with latest-wins semantics, C overwrites B
-        // before the worker takes them out. After A's call returns (stale →
-        // skip), the worker picks up C directly — B is never processed.
-        use crate::data::lsp::types::SemanticToken as ST;
-        let path = std::path::PathBuf::from("latest_wins.rs");
-
-        let mut lsp = LspEngine::new(LspEngineConfig::default());
-        lsp.inject_test_semantic_tokens(
-            path.clone(),
-            vec![ST {
-                line: 0,
-                start_col: 0,
-                length: 2,
-                token_type: "keyword".to_string(),
-            }],
-        );
-        lsp.test_semantic_tokens_delay = Some(Duration::from_millis(500));
-
-        let call_count = Arc::new(Mutex::new(0usize));
-        let cc = Arc::clone(&call_count);
-        let counter_frontend = Arc::new({
-            struct Counter(Arc<Mutex<usize>>);
-            impl SyntaxFrontend for Counter {
-                fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
-                    *self.0.lock().unwrap() += 1;
-                }
-            }
-            Counter(cc)
-        });
-
-        let lsp_arc = Arc::new(Mutex::new(lsp));
-        let mut engine = SyntaxEngine::new(
-            Arc::clone(&lsp_arc),
-            counter_frontend as Arc<dyn SyntaxFrontend>,
-        );
-
-        // compute(A): sync delivery #1, worker debounces 300ms, then starts
-        // a 500ms LSP call at t≈300ms (finishes at t≈800ms).
-        engine.compute(path.as_path(), "fn a() {}");
-        assert_eq!(*call_count.lock().unwrap(), 1);
-
-        // Wait past the debounce so the worker is mid-LSP-call.
-        std::thread::sleep(Duration::from_millis(400));
-
-        // compute(B) then compute(C) — both arrive while worker is in LSP call.
-        // With latest-wins, C overwrites B in the slot before the worker
-        // takes them. The worker should pick up C (not B) next.
-        engine.compute(path.as_path(), "fn b() {}");
-        engine.compute(path.as_path(), "fn c() {}");
-        assert_eq!(*call_count.lock().unwrap(), 3, "three sync deliveries");
-
-        // Timeline:
-        //   t≈800ms  – LSP(A) returns; content_hash is now hash(C) → SKIP
-        //   t≈800ms  – worker takes C, debounces 300ms (t≈1100ms)
-        //   t≈1600ms – LSP(C) returns; staleness OK → delivery #4
-        // Sleep 1500ms after compute(C) (total ~1900ms after start).
-        std::thread::sleep(Duration::from_millis(1500));
-
-        let total = *call_count.lock().unwrap();
-        assert_eq!(
-            total, 4,
-            "exactly one worker delivery (for C); B was overwritten before worker took it"
-        );
+        assert_latest_semantic_delivery(&["fn b() {}", "fn c() {}"]);
     }
 
     #[test]
@@ -606,5 +619,63 @@ mod tests {
             5,
             "no additional worker delivery for config languages (has_lsp: false)"
         );
+    }
+    #[test]
+    fn background_local_worker_keeps_latest_revision_without_blocking_submission() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            mpsc,
+        };
+        struct Gated {
+            current: AtomicU64,
+            first: AtomicBool,
+            entered: mpsc::SyncSender<()>,
+            release: Mutex<mpsc::Receiver<()>>,
+            metrics: mpsc::SyncSender<u64>,
+        }
+        impl SyntaxFrontend for Gated {
+            fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {}
+            fn begin_revision(&self, _: &Path, hash: u64) {
+                self.current.store(hash, Ordering::Release);
+            }
+            fn set_semantic_tokens_versioned(&self, _: &Path, _: u64, _: Vec<SemanticToken>) {
+                if self.first.swap(false, Ordering::AcqRel) {
+                    self.entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+            }
+            fn set_buffer_metrics_versioned(&self, _: &Path, hash: u64, _: usize, _: usize) {
+                if self.current.load(Ordering::Acquire) == hash {
+                    self.metrics.send(hash).unwrap();
+                }
+            }
+        }
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, gate) = mpsc::sync_channel(1);
+        let (metrics, delivered) = mpsc::sync_channel(1);
+        let frontend = Arc::new(Gated {
+            current: AtomicU64::new(0),
+            first: AtomicBool::new(true),
+            entered,
+            release: Mutex::new(gate),
+            metrics,
+        });
+        let engine = Arc::new(Mutex::new(LspEngine::new(LspEngineConfig::default())));
+        let mut syntax = SyntaxEngine::new_background(engine, frontend);
+        let path = Path::new("latest.json");
+        syntax.compute(path, "{\"value\":1}");
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        syntax.compute(path, "{\"value\":2}");
+        syntax.compute(path, "{\"value\":3}");
+        release.send(()).unwrap();
+        assert_eq!(
+            delivered.recv_timeout(Duration::from_secs(5)).unwrap(),
+            super::hash_content("{\"value\":3}")
+        );
+        assert!(delivered.try_recv().is_err());
     }
 }

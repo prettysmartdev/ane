@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::commands::lsp_engine::LspEngine;
+use crate::commands::lsp_engine::LspProvider;
 use crate::data::buffer::Buffer;
 use crate::data::chord_types::{Action, Component, Positional, Scope};
 use crate::data::lsp::types::{DocumentSymbol, SymbolKind};
@@ -17,7 +17,7 @@ use super::types::{
 pub fn resolve(
     query: &ChordQuery,
     buffers: &HashMap<String, Buffer>,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<ResolvedChord> {
     let mut resolutions = HashMap::new();
 
@@ -36,7 +36,7 @@ fn resolve_buffer(
     query: &ChordQuery,
     buffer_name: &str,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<BufferResolution> {
     if query.action == Action::List {
         let (listed_items, warnings) = resolve_list(query, buffer, lsp, buffer_name)?;
@@ -151,7 +151,7 @@ fn resolve_count_positional(
     query: &ChordQuery,
     buffer_name: &str,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     n: u8,
 ) -> Result<BufferResolution> {
     let (cursor_line, cursor_col) = query.args.cursor_pos.ok_or_else(|| {
@@ -215,7 +215,7 @@ fn resolve_count_line(
     query: &ChordQuery,
     buffer: &Buffer,
     buffer_name: &str,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     n: u8,
     cursor_line: usize,
     cursor_col: usize,
@@ -319,7 +319,7 @@ fn resolve_line_scope_at(buffer: &Buffer, line: usize, buffer_name: &str) -> Res
 fn resolve_count_lsp(
     query: &ChordQuery,
     buffer_name: &str,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     n: u8,
     cursor_line: usize,
     cursor_col: usize,
@@ -393,7 +393,7 @@ fn resolve_scope(
     query: &ChordQuery,
     buffer_name: &str,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<TextRange> {
     match query.scope {
         Scope::Line => resolve_line_scope(query, buffer, buffer_name),
@@ -507,7 +507,7 @@ fn resolve_lsp_scope(
     query: &ChordQuery,
     buffer_name: &str,
     _buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     target_kinds: &[SymbolKind],
 ) -> Result<TextRange> {
     let path = Path::new(buffer_name);
@@ -605,7 +605,7 @@ fn resolve_member_scope(
     query: &ChordQuery,
     buffer_name: &str,
     _buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<TextRange> {
     let path = Path::new(buffer_name);
     let symbols = lsp.document_symbols(path).map_err(|e| {
@@ -717,7 +717,7 @@ fn resolve_variable_scope(
     query: &ChordQuery,
     buffer_name: &str,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<TextRange> {
     let target_kinds = &[SymbolKind::Variable, SymbolKind::Const];
     let path = Path::new(buffer_name);
@@ -800,7 +800,7 @@ fn resolve_variable_scope_via_selection_range(
     query: &ChordQuery,
     buffer_name: &str,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<TextRange> {
     let (line, col) = query.args.cursor_pos.ok_or_else(|| {
         ChordError::resolve(
@@ -860,7 +860,7 @@ fn resolve_component(
     buffer: &Buffer,
     scope_range: &TextRange,
     buffer_name: &str,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
 ) -> Result<TextRange> {
     match query.component {
         Component::Beginning => Ok(TextRange::point(
@@ -887,7 +887,7 @@ fn resolve_name_component(
     query: &ChordQuery,
     buffer: &Buffer,
     buffer_name: &str,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     scope_range: &TextRange,
 ) -> Result<TextRange> {
     if query.scope == Scope::Line || query.scope == Scope::Buffer {
@@ -2155,15 +2155,12 @@ fn shrink_range(buffer: &Buffer, range: &TextRange) -> TextRange {
             let start_line = range.start_line;
             let start_col = range.start_col + 1;
 
-            let end_line;
-            let end_col;
-            if inner_lines == 0 {
-                end_line = start_line;
-                end_col = range.end_col.saturating_sub(1);
+            let end_line = if inner_lines == 0 {
+                start_line
             } else {
-                end_line = range.end_line;
-                end_col = range.end_col.saturating_sub(1);
-            }
+                range.end_line
+            };
+            let end_col = range.end_col.saturating_sub(1);
 
             return TextRange {
                 start_line,
@@ -2522,7 +2519,7 @@ fn char_offset_to_range(
 fn resolve_list(
     query: &ChordQuery,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     buffer_name: &str,
 ) -> Result<(Vec<ListItem>, Vec<String>)> {
     let mut items = collect_list_candidates(query, buffer, lsp, buffer_name)?;
@@ -2581,7 +2578,7 @@ fn resolve_list(
 fn collect_list_candidates(
     query: &ChordQuery,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     buffer_name: &str,
 ) -> Result<Vec<ListItem>> {
     match query.component {
@@ -2651,7 +2648,7 @@ fn collect_word_items(
 fn collect_lsp_items(
     query: &ChordQuery,
     buffer: &Buffer,
-    lsp: &mut LspEngine,
+    lsp: &mut dyn LspProvider,
     buffer_name: &str,
 ) -> Result<Vec<ListItem>> {
     let path = Path::new(buffer_name);

@@ -3,16 +3,39 @@ use crate::data::lsp::types::SemanticToken;
 /// LSP tokens win over tree-sitter tokens on any overlapping character range.
 /// Both inputs must be sorted by (line, start_col).
 pub fn merge(ts: &[SemanticToken], lsp: &[SemanticToken]) -> Vec<SemanticToken> {
+    let _timing =
+        crate::commands::diagnostics::Timing::new_count("token_merge", ts.len() + lsp.len());
     let mut result = Vec::with_capacity(ts.len() + lsp.len());
 
-    for ts_tok in ts {
-        let overlaps_lsp = lsp.iter().any(|l| {
-            l.line == ts_tok.line
-                && l.start_col < ts_tok.start_col + ts_tok.length
-                && l.start_col + l.length > ts_tok.start_col
+    // Collapse LSP intervals into their union. This handles nested and
+    // overlapping intervals without assuming their ends are monotonic.
+    let mut intervals: Vec<(usize, usize, usize)> = Vec::new();
+    for token in lsp {
+        let end = token.start_col.saturating_add(token.length);
+        if let Some(last) = intervals.last_mut()
+            && last.0 == token.line
+            && token.start_col < last.2
+        {
+            last.2 = last.2.max(end);
+        } else {
+            intervals.push((token.line, token.start_col, end));
+        }
+    }
+    let mut i = 0;
+    for token in ts {
+        while i < intervals.len()
+            && (intervals[i].0 < token.line
+                || (intervals[i].0 == token.line && intervals[i].2 <= token.start_col))
+        {
+            i += 1;
+        }
+        let overlaps = intervals.get(i).is_some_and(|&(line, start, end)| {
+            line == token.line
+                && start < token.start_col.saturating_add(token.length)
+                && end > token.start_col
         });
-        if !overlaps_lsp {
-            result.push(ts_tok.clone());
+        if !overlaps {
+            result.push(token.clone());
         }
     }
 
@@ -74,5 +97,50 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].token_type, "keyword");
         assert_eq!(result[1].token_type, "variable");
+    }
+    #[test]
+    fn sweep_matches_overlap_oracle_for_nested_and_empty_intervals() {
+        // Exercise sorted inputs with nested tokens, equal starts, touching
+        // ends and empty ranges, rather than only disjoint happy paths.
+        let ts: Vec<_> = (0..3)
+            .flat_map(|line| {
+                (0..12)
+                    .flat_map(move |start| (0..8).map(move |length| tok(line, start, length, "ts")))
+            })
+            .collect();
+        for seed in 0..40 {
+            let mut lsp: Vec<_> = (0..30)
+                .map(|i| {
+                    tok(
+                        (i + seed) % 3,
+                        (i * 7 + seed) % 12,
+                        (i * 11 + seed) % 9,
+                        "lsp",
+                    )
+                })
+                .collect();
+            lsp.sort_by_key(|t| (t.line, t.start_col));
+            let mut expected: Vec<_> = ts
+                .iter()
+                .filter(|t| {
+                    !lsp.iter().any(|l| {
+                        l.line == t.line
+                            && l.start_col < t.start_col + t.length
+                            && l.start_col + l.length > t.start_col
+                    })
+                })
+                .cloned()
+                .collect();
+            expected.extend_from_slice(&lsp);
+            expected.sort_by_key(|t| (t.line, t.start_col));
+            let actual = merge(&ts, &lsp);
+            let key = |tokens: &[SemanticToken]| {
+                tokens
+                    .iter()
+                    .map(|t| (t.line, t.start_col, t.length, t.token_type.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(key(&actual), key(&expected), "seed {seed}");
+        }
     }
 }

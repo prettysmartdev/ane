@@ -31,6 +31,14 @@ LSP-scoped chords wait for the server to reach the `Running` state before execut
 
 ---
 
+## Request deadlines and cancellation
+
+After initialization, requests have a five-second response deadline by default; this is separate from the 30-second startup deadline. Library callers can configure it with `LspEngineConfig::with_request_timeout`. Dedicated pipe workers keep silent or partially responding servers from blocking the TUI. Late responses retain their original request IDs and cannot complete a newer request.
+
+In the TUI, running chords can be cancelled with Esc. A cancelled or timed-out chord reports its outcome without applying an outdated edit. Language-server requests use the captured unsaved buffer text. Local highlighting and non-LSP chords continue independently of semantic requests.
+
+---
+
 ## Supported languages
 
 | Language | Server | Detection |
@@ -63,7 +71,7 @@ The status bar shows the current LSP state:
 
 When a chord targets an LSP scope (Function, Variable, Struct, Member):
 
-- **TUI mode**: the chord waits for LSP readiness. If the server is still starting, the status bar shows progress.
+- **TUI mode**: if the server is still starting, the status bar asks you to wait and retry the chord. Once ready, the chord resolves in a cancellable background worker.
 - **Exec mode**: the command blocks until the server is ready, then executes the chord.
 
 Non-LSP chords (Line, Buffer, Delimiter) bypass this gate entirely and execute immediately.

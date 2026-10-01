@@ -8,3 +8,5 @@ pub mod status_bar;
 pub mod title_bar;
 pub mod tree_pane;
 pub mod tui_frontend;
+
+mod background_chord;

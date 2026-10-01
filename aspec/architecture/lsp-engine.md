@@ -249,3 +249,15 @@ The ChordEngine's resolver stage calls `LspEngine::document_symbols()` and `LspE
 
 ### Data Layer (Layer 0)
 LSPEngine reads from `data::lsp::registry` for server definitions and `data::lsp::types` for shared type definitions. It does not write to Layer 0.
+
+## TUI request endpoints and response deadlines (WI-16)
+
+`LspEngine::request_client` snapshots ready, cloneable endpoints under a short engine lock. `LspClient` performs request I/O and response waits after that lock is released. A per-server document lock orders nonblocking `didOpen`/`didChange` notification and request enqueueing; it is released before waiting. Chord clients carry captured unsaved text and a cancellation token. Interactive clients defer new background semantic requests while an interactive operation is pending.
+
+`LspProvider` exposes the resolver's document-symbol and selection-range queries. The headless CLI still supplies `LspEngine`; the TUI supplies `LspClient`, or `NoLsp` for chords that do not require semantic queries. Non-LSP resolution therefore never acquires the global engine mutex.
+
+Each transport has one pipe writer and one pipe reader. Outbound messages use a bounded queue, and responses are routed by ID to deadline-aware waiters. Server requests are distinguished by their `method`, even when their numeric ID collides with a client request. Configuration requests receive default/null entries; supported registration/progress requests are acknowledged; unsupported methods receive a JSON-RPC error. Notifications are handled separately from request responses.
+
+`request_timeout` defaults to five seconds and is configurable through `with_request_timeout`; initialization uses `startup_timeout` instead. Timeouts, cancelled waiters, closed streams, and partial responses cannot cause an unbounded caller wait. Late responses are discarded when their request is no longer pending. Transport failure is reflected in engine status polling. The synchronous CLI error path kills a live failed process before reaping it, avoiding a second indefinite wait.
+
+The TUI restores terminal state through a scope guard before starting shutdown. Its overall shutdown wait is limited to two seconds; an independent control handle can terminate children without acquiring the engine mutex. Individual graceful handshakes retain their existing 1.5-second bound. Background scans, watcher teardown, and syntax jobs do not have to finish before terminal restoration.

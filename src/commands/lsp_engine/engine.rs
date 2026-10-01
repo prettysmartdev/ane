@@ -27,6 +27,7 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(1_500);
 pub struct LspEngineConfig {
     pub auto_install: bool,
     pub startup_timeout: Duration,
+    pub request_timeout: Duration,
     binary_name_override: Option<String>,
     binary_args_override: Vec<String>,
     check_command_override: Option<String>,
@@ -37,6 +38,7 @@ impl Default for LspEngineConfig {
         Self {
             auto_install: true,
             startup_timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_secs(5),
             binary_name_override: None,
             binary_args_override: Vec::new(),
             check_command_override: None,
@@ -47,6 +49,11 @@ impl Default for LspEngineConfig {
 impl LspEngineConfig {
     pub fn with_startup_timeout(mut self, timeout: Duration) -> Self {
         self.startup_timeout = timeout;
+        self
+    }
+
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
         self
     }
 
@@ -82,6 +89,7 @@ struct StartupContext {
     auto_install: bool,
     overrides: ServerOverrides,
     startup_timeout: Duration,
+    request_timeout: Duration,
     install_progress: Option<Arc<dyn InstallProgress>>,
     install_lock: Arc<Mutex<()>>,
 }
@@ -95,6 +103,7 @@ struct ServerInstance {
     startup_rx: Option<mpsc::Receiver<LspTransport>>,
     opened_files: HashSet<PathBuf>,
     root_path: PathBuf,
+    documents: Arc<Mutex<HashMap<PathBuf, (u64, i32)>>>,
 }
 
 impl ServerInstance {
@@ -129,9 +138,16 @@ fn try_transition(
     Some(old)
 }
 
+#[cfg(test)]
+pub(crate) struct SemanticTestGate {
+    pub entered: mpsc::Sender<()>,
+    pub release: Mutex<mpsc::Receiver<()>>,
+}
+
 pub struct LspEngine {
     servers: HashMap<Language, ServerInstance>,
     config: LspEngineConfig,
+    interactive: Arc<std::sync::atomic::AtomicUsize>,
     event_tx: mpsc::Sender<LspEvent>,
     event_rx: mpsc::Receiver<LspEvent>,
     install_progress: Option<Arc<dyn InstallProgress>>,
@@ -146,6 +162,8 @@ pub struct LspEngine {
     pub did_open_log: Vec<(PathBuf, String)>,
     #[cfg(any(test, feature = "test-support"))]
     pub test_semantic_tokens_delay: Option<Duration>,
+    #[cfg(test)]
+    pub(crate) test_semantic_gate: Option<Arc<SemanticTestGate>>,
 }
 
 impl LspEngine {
@@ -154,6 +172,7 @@ impl LspEngine {
         Self {
             servers: HashMap::new(),
             config,
+            interactive: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             event_tx,
             event_rx,
             install_progress: None,
@@ -168,6 +187,8 @@ impl LspEngine {
             did_open_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             test_semantic_tokens_delay: None,
+            #[cfg(test)]
+            test_semantic_gate: None,
         }
     }
 
@@ -249,6 +270,7 @@ impl LspEngine {
                 check_command: self.config.check_command_override.clone(),
             },
             startup_timeout: self.config.startup_timeout,
+            request_timeout: self.config.request_timeout,
             install_progress: self.install_progress.clone(),
             install_lock: Arc::clone(&self.install_lock),
         };
@@ -266,6 +288,7 @@ impl LspEngine {
                 transport: None,
                 startup_rx: Some(transport_rx),
                 opened_files: HashSet::new(),
+                documents: Arc::new(Mutex::new(HashMap::new())),
                 root_path,
             },
         );
@@ -399,8 +422,65 @@ impl LspEngine {
     pub fn status_summary(&self) -> Vec<(Language, ServerState)> {
         self.servers
             .iter()
-            .map(|(lang, server)| (*lang, server.get_state()))
+            .map(|(lang, server)| {
+                if server
+                    .transport
+                    .as_ref()
+                    .is_some_and(LspTransport::is_closed)
+                {
+                    try_transition(&server.state, *lang, ServerState::Failed, &self.event_tx);
+                }
+                (*lang, server.get_state())
+            })
             .collect()
+    }
+
+    /// Snapshot ready request endpoints while holding only a short engine lock.
+    /// Pipe I/O and response waits happen after the caller releases that lock.
+    pub fn request_client(&mut self) -> LspClient {
+        let languages: Vec<_> = self.servers.keys().copied().collect();
+        for lang in languages {
+            self.try_recv_startup(lang);
+        }
+        LspClient {
+            interactive: Arc::clone(&self.interactive),
+            lease: None,
+            contents: HashMap::new(),
+            servers: self
+                .servers
+                .iter()
+                .filter_map(|(&lang, server)| {
+                    (server.get_state() == ServerState::Running)
+                        .then(|| {
+                            server.transport.as_ref().map(|transport| {
+                                (lang, (transport.clone(), Arc::clone(&server.documents)))
+                            })
+                        })
+                        .flatten()
+                })
+                .collect(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_symbols: self.test_symbols.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_selection_ranges: self.test_selection_ranges.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_semantic_tokens: self.test_semantic_tokens.clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_semantic_tokens_delay: self.test_semantic_tokens_delay,
+            #[cfg(test)]
+            test_semantic_gate: self.test_semantic_gate.clone(),
+        }
+    }
+
+    /// Child handles are independent of the engine mutex, including during startup.
+    pub fn shutdown_control(&self) -> ShutdownControl {
+        ShutdownControl {
+            children: self
+                .servers
+                .values()
+                .map(|s| Arc::clone(&s.child))
+                .collect(),
+        }
     }
 
     // --- LSP Query Methods ---
@@ -685,6 +765,7 @@ impl LspEngine {
             server.opened_files.clear();
             // Reap the child so we don't leave a zombie.
             if let Some(mut c) = server.child.lock().unwrap().take() {
+                let _ = c.kill();
                 let _ = c.wait();
             }
             if !current.is_terminal() || current == ServerState::Running {
@@ -714,6 +795,7 @@ impl LspEngine {
         // SHUTDOWN_GRACE. Take ownership of the transport so the worker thread
         // can drive it without an aliased borrow.
         if let Some(mut transport) = server.transport.take() {
+            transport.cancel_pending();
             let (done_tx, done_rx) = mpsc::channel::<()>();
             let handle = thread::spawn(move || {
                 let _ = transport.send_request("shutdown", Value::Null);
@@ -774,6 +856,197 @@ impl LspEngine {
             }
         });
         self.send_notification(lang, "textDocument/didOpen", params)
+    }
+}
+
+/// The resolver depends on these queries, not ownership of the global engine.
+pub trait LspProvider {
+    fn document_symbols(&mut self, path: &Path) -> Result<Vec<DocumentSymbol>>;
+    fn selection_range(&mut self, path: &Path, line: usize, col: usize) -> Result<SelectionRange>;
+}
+
+impl LspProvider for LspEngine {
+    fn document_symbols(&mut self, path: &Path) -> Result<Vec<DocumentSymbol>> {
+        self.document_symbols(path)
+    }
+    fn selection_range(&mut self, path: &Path, line: usize, col: usize) -> Result<SelectionRange> {
+        self.selection_range(path, line, col)
+    }
+}
+
+pub struct NoLsp;
+impl LspProvider for NoLsp {
+    fn document_symbols(&mut self, _: &Path) -> Result<Vec<DocumentSymbol>> {
+        bail!("LSP unavailable")
+    }
+    fn selection_range(&mut self, _: &Path, _: usize, _: usize) -> Result<SelectionRange> {
+        bail!("LSP unavailable")
+    }
+}
+
+type ClientServer = (LspTransport, Arc<Mutex<HashMap<PathBuf, (u64, i32)>>>);
+#[derive(Clone)]
+pub struct LspClient {
+    interactive: Arc<std::sync::atomic::AtomicUsize>,
+    lease: Option<Arc<InteractiveLease>>,
+    contents: HashMap<PathBuf, String>,
+    servers: HashMap<Language, ClientServer>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_symbols: HashMap<PathBuf, Vec<DocumentSymbol>>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_selection_ranges: HashMap<(PathBuf, usize, usize), SelectionRange>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_semantic_tokens: HashMap<PathBuf, Vec<SemanticToken>>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_semantic_tokens_delay: Option<Duration>,
+    #[cfg(test)]
+    test_semantic_gate: Option<Arc<SemanticTestGate>>,
+}
+
+struct InteractiveLease(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for InteractiveLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+impl LspClient {
+    pub fn interactive_pending(&self) -> bool {
+        self.interactive.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+    pub fn with_contents(mut self, contents: HashMap<PathBuf, String>) -> Self {
+        self.contents = contents;
+        self
+    }
+    pub fn with_cancellation(mut self, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        if self.lease.is_none() {
+            self.interactive
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.lease = Some(Arc::new(InteractiveLease(Arc::clone(&self.interactive))));
+        }
+        for (transport, _) in self.servers.values_mut() {
+            *transport = transport.clone().with_cancellation(Arc::clone(&cancel));
+        }
+        self
+    }
+
+    fn request(
+        &self,
+        path: &Path,
+        content: Option<&str>,
+        method: &str,
+        params: Value,
+    ) -> Result<Value> {
+        use std::hash::{Hash, Hasher};
+        let lang = Language::from_path(path).ok_or_else(|| anyhow::anyhow!("unknown language"))?;
+        let (endpoint, documents) = self
+            .servers
+            .get(&lang)
+            .ok_or_else(|| anyhow::anyhow!("LSP not ready"))?;
+        let mut transport = endpoint.clone();
+        let text = content
+            .or_else(|| self.contents.get(path).map(String::as_str))
+            .map(str::to_owned)
+            .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hash);
+        let hash = hash.finish();
+        // The lock covers only nonblocking notification enqueueing. It orders
+        // didOpen/didChange across syntax and interactive request workers.
+        let mut documents = documents.lock().unwrap();
+        match documents.get(path).copied() {
+            None => {
+                transport.send_notification("textDocument/didOpen", json!({"textDocument": {
+                    "uri": path_to_uri(path), "languageId": Language::language_id_for_path(path).unwrap_or(lang.name()),
+                    "version": 1, "text": text
+                }}))?;
+                documents.insert(path.to_path_buf(), (hash, 1));
+            }
+            Some((old, version)) if old != hash => {
+                let version = version.saturating_add(1);
+                transport.send_notification(
+                    "textDocument/didChange",
+                    json!({
+                        "textDocument": {"uri":path_to_uri(path), "version":version},
+                        "contentChanges":[{"text":text}]
+                    }),
+                )?;
+                documents.insert(path.to_path_buf(), (hash, version));
+            }
+            _ => {}
+        }
+        let request = transport.start_request(method, params)?;
+        drop(documents);
+        request.wait()
+    }
+
+    pub fn semantic_tokens(&mut self, path: &Path, content: &str) -> Result<Vec<SemanticToken>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(tokens) = self.test_semantic_tokens.get(path) {
+            #[cfg(test)]
+            if let Some(gate) = &self.test_semantic_gate {
+                gate.entered.send(()).unwrap();
+                gate.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            if let Some(delay) = self.test_semantic_tokens_delay {
+                thread::sleep(delay);
+            }
+            return Ok(tokens.clone());
+        }
+        let result = self.request(
+            path,
+            Some(content),
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":path_to_uri(path)}}),
+        )?;
+        parse_semantic_tokens(&result)
+    }
+}
+
+impl LspProvider for LspClient {
+    fn document_symbols(&mut self, path: &Path) -> Result<Vec<DocumentSymbol>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(symbols) = self.test_symbols.get(path) {
+            return Ok(symbols.clone());
+        }
+        let result = self.request(
+            path,
+            None,
+            "textDocument/documentSymbol",
+            json!({"textDocument":{"uri":path_to_uri(path)}}),
+        )?;
+        parse_document_symbols(&result)
+    }
+    fn selection_range(&mut self, path: &Path, line: usize, col: usize) -> Result<SelectionRange> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(range) = self
+            .test_selection_ranges
+            .get(&(path.to_path_buf(), line, col))
+        {
+            return Ok(range.clone());
+        }
+        let result = self.request(path, None,"textDocument/selectionRange",
+            json!({"textDocument":{"uri":path_to_uri(path)},"positions":[{"line":line,"character":col}]}))?;
+        parse_selection_range(&result)
+    }
+}
+
+pub struct ShutdownControl {
+    children: Vec<Arc<Mutex<Option<Child>>>>,
+}
+impl ShutdownControl {
+    /// This bypasses engine ownership so a stuck request cannot block cleanup.
+    pub fn terminate(&self) {
+        for child in &self.children {
+            if let Ok(mut slot) = child.try_lock()
+                && let Some(child) = slot.as_mut()
+            {
+                let _ = child.kill();
+            }
+        }
     }
 }
 
@@ -944,6 +1217,7 @@ fn startup_thread(
     });
 
     let mut transport = LspTransport::new(stdin, stdout);
+    transport.set_timeout(ctx.startup_timeout);
 
     let root_uri = path_to_uri(&ctx.root_path);
     let init_params = json!({
@@ -970,6 +1244,7 @@ fn startup_thread(
         return;
     }
 
+    transport.set_timeout(ctx.request_timeout);
     if let Err(e) = transport.send_notification("initialized", json!({})) {
         try_transition(&state, lang, ServerState::Failed, &event_tx);
         if let Some(mut c) = child_slot.lock().unwrap().take() {
@@ -1172,7 +1447,8 @@ fn parse_hover(value: &Value) -> Option<HoverInfo> {
         s.to_string()
     } else if let Some(obj) = contents.as_object() {
         obj.get("value")?.as_str()?.to_string()
-    } else if let Some(arr) = contents.as_array() {
+    } else {
+        let arr = contents.as_array()?;
         arr.iter()
             .filter_map(|v| {
                 v.as_str()
@@ -1181,8 +1457,6 @@ fn parse_hover(value: &Value) -> Option<HoverInfo> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    } else {
-        return None;
     };
 
     Some(HoverInfo { contents: text })
