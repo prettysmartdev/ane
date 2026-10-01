@@ -2155,15 +2155,12 @@ fn shrink_range(buffer: &Buffer, range: &TextRange) -> TextRange {
             let start_line = range.start_line;
             let start_col = range.start_col + 1;
 
-            let end_line;
-            let end_col;
-            if inner_lines == 0 {
-                end_line = start_line;
-                end_col = range.end_col.saturating_sub(1);
+            let end_line = if inner_lines == 0 {
+                start_line
             } else {
-                end_line = range.end_line;
-                end_col = range.end_col.saturating_sub(1);
-            }
+                range.end_line
+            };
+            let end_col = range.end_col.saturating_sub(1);
 
             return TextRange {
                 start_line,

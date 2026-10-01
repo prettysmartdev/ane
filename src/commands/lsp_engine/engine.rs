@@ -1424,7 +1424,8 @@ fn parse_hover(value: &Value) -> Option<HoverInfo> {
         s.to_string()
     } else if let Some(obj) = contents.as_object() {
         obj.get("value")?.as_str()?.to_string()
-    } else if let Some(arr) = contents.as_array() {
+    } else {
+        let arr = contents.as_array()?;
         arr.iter()
             .filter_map(|v| {
                 v.as_str()
@@ -1433,8 +1434,6 @@ fn parse_hover(value: &Value) -> Option<HoverInfo> {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    } else {
-        return None;
     };
 
     Some(HoverInfo { contents: text })
