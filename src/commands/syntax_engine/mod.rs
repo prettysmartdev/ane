@@ -521,149 +521,63 @@ mod tests {
         assert_eq!(total, 11, "worker should fire exactly once after debounce");
     }
 
-    #[test]
-    fn staleness_check_discards_outdated_lsp_tokens() {
-        use crate::data::lsp::types::SemanticToken as ST;
+    fn assert_latest_semantic_delivery(queued: &[&str]) {
+        use crate::commands::lsp_engine::SemanticTestGate;
+        use std::sync::mpsc;
 
-        // Strategy: inject slow LSP tokens (400ms delay). After the debounce
-        // window (300ms), the worker calls semantic_tokens and SLEEPS for 400ms.
-        // During that sleep the test thread calls compute(B), updating
-        // content_hashes to hash(B). When the worker wakes and checks staleness,
-        // hash(A) ≠ hash(B) → SKIP. Only the two sync deliveries occur.
-        let path = std::path::PathBuf::from("staleness_test.rs");
-
+        let path = PathBuf::from("latest_wins.rs");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (delivery_tx, delivery_rx) = mpsc::channel();
+        struct Counter(mpsc::Sender<()>);
+        impl SyntaxFrontend for Counter {
+            fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
+                self.0.send(()).unwrap();
+            }
+        }
         let mut lsp = LspEngine::new(LspEngineConfig::default());
         lsp.inject_test_semantic_tokens(
             path.clone(),
-            vec![ST {
+            vec![SemanticToken {
                 line: 0,
                 start_col: 0,
                 length: 2,
-                token_type: "keyword".to_string(),
+                token_type: "keyword".into(),
             }],
         );
-        lsp.test_semantic_tokens_delay = Some(Duration::from_millis(400));
-
-        let call_count = Arc::new(Mutex::new(0usize));
-        let cc = Arc::clone(&call_count);
-        let counter_frontend = Arc::new({
-            struct Counter(Arc<Mutex<usize>>);
-            impl SyntaxFrontend for Counter {
-                fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
-                    *self.0.lock().unwrap() += 1;
-                }
-            }
-            Counter(cc)
-        });
-
-        let lsp_arc = Arc::new(Mutex::new(lsp));
-        let mut engine = SyntaxEngine::new(
-            Arc::clone(&lsp_arc),
-            counter_frontend as Arc<dyn SyntaxFrontend>,
+        lsp.test_semantic_gate = Some(Arc::new(SemanticTestGate {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let mut engine =
+            SyntaxEngine::new(Arc::new(Mutex::new(lsp)), Arc::new(Counter(delivery_tx)));
+        let timeout = Duration::from_secs(5);
+        engine.compute(&path, "fn a() {}");
+        delivery_rx.recv_timeout(timeout).unwrap(); // synchronous A
+        entered_rx.recv_timeout(timeout).unwrap(); // semantic A is blocked
+        for content in queued {
+            engine.compute(&path, content);
+            delivery_rx.recv_timeout(timeout).unwrap(); // synchronous edit
+        }
+        release_tx.send(()).unwrap();
+        entered_rx.recv_timeout(timeout).unwrap(); // newest snapshot only
+        assert!(
+            delivery_rx.try_recv().is_err(),
+            "stale A must not be delivered"
         );
+        release_tx.send(()).unwrap();
+        delivery_rx.recv_timeout(timeout).unwrap(); // newest semantic result
+        assert!(delivery_rx.try_recv().is_err());
+    }
 
-        // compute(A): queued, worker starts 300ms debounce
-        engine.compute(path.as_path(), "fn foo() {}");
-        assert_eq!(
-            *call_count.lock().unwrap(),
-            1,
-            "sync delivery for content A"
-        );
-
-        // Wait for debounce to expire so the worker starts the slow LSP call
-        std::thread::sleep(Duration::from_millis(350));
-
-        // compute(B): worker is now sleeping inside semantic_tokens (400ms delay).
-        // This updates content_hashes to hash(B), and req(B) is queued.
-        engine.compute(path.as_path(), "fn bar() {}");
-        assert_eq!(
-            *call_count.lock().unwrap(),
-            2,
-            "sync delivery for content B"
-        );
-
-        // Timeline after compute(B) at t=350ms:
-        //   t≈700ms  – slow LSP for req(A) returns; staleness check → SKIP
-        //   t≈700ms  – worker picks up req(B), 300ms debounce fires at t≈1000ms
-        //   t≈1400ms – slow LSP for req(B) returns; staleness OK → delivery #3
-        // Sleep 2100ms after compute(B) (total ~2450ms) to ensure delivery #3 has fired.
-        std::thread::sleep(Duration::from_millis(2100));
-
-        // delivery #3 comes from req(B) processed correctly; req(A) was discarded
-        let final_count = *call_count.lock().unwrap();
-        assert_eq!(
-            final_count, 3,
-            "req(A) stale → skip; req(B) not stale → deliver; total = 3"
-        );
+    #[test]
+    fn staleness_check_discards_outdated_lsp_tokens() {
+        assert_latest_semantic_delivery(&["fn b() {}"]);
     }
 
     #[test]
     fn latest_wins_during_slow_lsp_call() {
-        // True latest-wins: while the worker is inside a slow semantic_tokens
-        // call for content A, two more computes happen (B then C). Both B and C
-        // are submitted to the slot; with latest-wins semantics, C overwrites B
-        // before the worker takes them out. After A's call returns (stale →
-        // skip), the worker picks up C directly — B is never processed.
-        use crate::data::lsp::types::SemanticToken as ST;
-        let path = std::path::PathBuf::from("latest_wins.rs");
-
-        let mut lsp = LspEngine::new(LspEngineConfig::default());
-        lsp.inject_test_semantic_tokens(
-            path.clone(),
-            vec![ST {
-                line: 0,
-                start_col: 0,
-                length: 2,
-                token_type: "keyword".to_string(),
-            }],
-        );
-        lsp.test_semantic_tokens_delay = Some(Duration::from_millis(500));
-
-        let call_count = Arc::new(Mutex::new(0usize));
-        let cc = Arc::clone(&call_count);
-        let counter_frontend = Arc::new({
-            struct Counter(Arc<Mutex<usize>>);
-            impl SyntaxFrontend for Counter {
-                fn set_semantic_tokens(&self, _: &Path, _: Vec<SemanticToken>) {
-                    *self.0.lock().unwrap() += 1;
-                }
-            }
-            Counter(cc)
-        });
-
-        let lsp_arc = Arc::new(Mutex::new(lsp));
-        let mut engine = SyntaxEngine::new(
-            Arc::clone(&lsp_arc),
-            counter_frontend as Arc<dyn SyntaxFrontend>,
-        );
-
-        // compute(A): sync delivery #1, worker debounces 300ms, then starts
-        // a 500ms LSP call at t≈300ms (finishes at t≈800ms).
-        engine.compute(path.as_path(), "fn a() {}");
-        assert_eq!(*call_count.lock().unwrap(), 1);
-
-        // Wait past the debounce so the worker is mid-LSP-call.
-        std::thread::sleep(Duration::from_millis(400));
-
-        // compute(B) then compute(C) — both arrive while worker is in LSP call.
-        // With latest-wins, C overwrites B in the slot before the worker
-        // takes them. The worker should pick up C (not B) next.
-        engine.compute(path.as_path(), "fn b() {}");
-        engine.compute(path.as_path(), "fn c() {}");
-        assert_eq!(*call_count.lock().unwrap(), 3, "three sync deliveries");
-
-        // Timeline:
-        //   t≈800ms  – LSP(A) returns; content_hash is now hash(C) → SKIP
-        //   t≈800ms  – worker takes C, debounces 300ms (t≈1100ms)
-        //   t≈1600ms – LSP(C) returns; staleness OK → delivery #4
-        // Sleep 1500ms after compute(C) (total ~1900ms after start).
-        std::thread::sleep(Duration::from_millis(1500));
-
-        let total = *call_count.lock().unwrap();
-        assert_eq!(
-            total, 4,
-            "exactly one worker delivery (for C); B was overwritten before worker took it"
-        );
+        assert_latest_semantic_delivery(&["fn b() {}", "fn c() {}"]);
     }
 
     #[test]

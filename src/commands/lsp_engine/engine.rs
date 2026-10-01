@@ -138,6 +138,12 @@ fn try_transition(
     Some(old)
 }
 
+#[cfg(test)]
+pub(crate) struct SemanticTestGate {
+    pub entered: mpsc::Sender<()>,
+    pub release: Mutex<mpsc::Receiver<()>>,
+}
+
 pub struct LspEngine {
     servers: HashMap<Language, ServerInstance>,
     config: LspEngineConfig,
@@ -156,6 +162,8 @@ pub struct LspEngine {
     pub did_open_log: Vec<(PathBuf, String)>,
     #[cfg(any(test, feature = "test-support"))]
     pub test_semantic_tokens_delay: Option<Duration>,
+    #[cfg(test)]
+    pub(crate) test_semantic_gate: Option<Arc<SemanticTestGate>>,
 }
 
 impl LspEngine {
@@ -179,6 +187,8 @@ impl LspEngine {
             did_open_log: Vec::new(),
             #[cfg(any(test, feature = "test-support"))]
             test_semantic_tokens_delay: None,
+            #[cfg(test)]
+            test_semantic_gate: None,
         }
     }
 
@@ -457,6 +467,8 @@ impl LspEngine {
             test_semantic_tokens: self.test_semantic_tokens.clone(),
             #[cfg(any(test, feature = "test-support"))]
             test_semantic_tokens_delay: self.test_semantic_tokens_delay,
+            #[cfg(test)]
+            test_semantic_gate: self.test_semantic_gate.clone(),
         }
     }
 
@@ -887,6 +899,8 @@ pub struct LspClient {
     test_semantic_tokens: HashMap<PathBuf, Vec<SemanticToken>>,
     #[cfg(any(test, feature = "test-support"))]
     test_semantic_tokens_delay: Option<Duration>,
+    #[cfg(test)]
+    test_semantic_gate: Option<Arc<SemanticTestGate>>,
 }
 
 struct InteractiveLease(Arc<std::sync::atomic::AtomicUsize>);
@@ -968,6 +982,15 @@ impl LspClient {
     pub fn semantic_tokens(&mut self, path: &Path, content: &str) -> Result<Vec<SemanticToken>> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(tokens) = self.test_semantic_tokens.get(path) {
+            #[cfg(test)]
+            if let Some(gate) = &self.test_semantic_gate {
+                gate.entered.send(()).unwrap();
+                gate.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
             if let Some(delay) = self.test_semantic_tokens_delay {
                 thread::sleep(delay);
             }
